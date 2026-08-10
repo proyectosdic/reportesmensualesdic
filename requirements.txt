@@ -1,0 +1,4 @@
+streamlit>=1.50
+supabase>=2.18
+python-docx>=1.2.0
+reportlab>=4.2
