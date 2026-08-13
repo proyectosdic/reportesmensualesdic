@@ -9,22 +9,27 @@ import hashlib
 import hmac
 import requests
 import html
+import json
+import time
+import zipfile
 from urllib.parse import quote, urlparse
 from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
 import pandas as pd
+import matplotlib.pyplot as plt
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, PageBreak, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.colors import HexColor
+from reportlab.lib import colors
 from reportlab.pdfgen import canvas
 
 try:
@@ -333,6 +338,18 @@ if "password_setup_type" not in st.session_state:
     st.session_state.password_setup_type = ""
 if "generated_activation_codes" not in st.session_state:
     st.session_state.generated_activation_codes = []
+if "last_activity_at" not in st.session_state:
+    st.session_state.last_activity_at = None
+if "session_timeout_message" not in st.session_state:
+    st.session_state.session_timeout_message = ""
+if "stats_preview_enabled" not in st.session_state:
+    st.session_state.stats_preview_enabled = False
+if "database_backup_bytes" not in st.session_state:
+    st.session_state.database_backup_bytes = None
+if "database_backup_filename" not in st.session_state:
+    st.session_state.database_backup_filename = ""
+
+SESSION_TIMEOUT_SECONDS = 30 * 60
 
 def clear_center_capture_state(reset_period=False):
     """Clear all temporary director-capture data from the current Streamlit session."""
@@ -743,6 +760,39 @@ def get_activity_photos(activity_id):
     return [p for p in st.session_state.demo_photos if p["activity_id"] == activity_id]
 
 
+def mark_session_activity():
+    st.session_state.last_activity_at = time.time()
+
+
+def clear_session_activity():
+    st.session_state.last_activity_at = None
+
+
+def enforce_session_timeout():
+    """Expire authenticated sessions after 30 minutes without a Streamlit interaction."""
+    authenticated = bool(
+        st.session_state.get("admin_authenticated")
+        or st.session_state.get("center_authenticated")
+    )
+    if not authenticated:
+        return False
+
+    now = time.time()
+    last = st.session_state.get("last_activity_at")
+    if last is not None and now - float(last) >= SESSION_TIMEOUT_SECONDS:
+        if st.session_state.get("center_authenticated"):
+            auth_logout_center()
+        st.session_state.admin_authenticated = False
+        clear_session_activity()
+        st.session_state.session_timeout_message = (
+            "La sesión se cerró automáticamente después de 30 minutos sin actividad."
+        )
+        return True
+
+    mark_session_activity()
+    return False
+
+
 def check_admin_password(password):
     try:
         configured = st.secrets.get("ADMIN_PASSWORD", "")
@@ -752,6 +802,7 @@ def check_admin_password(password):
         return False, "ADMIN_PASSWORD no está configurada en los Secrets de Streamlit."
     if password == configured:
         st.session_state.admin_authenticated = True
+        mark_session_activity()
         return True, ""
     return False, "Contraseña incorrecta."
 
@@ -760,6 +811,7 @@ def admin_gate():
     if st.session_state.admin_authenticated:
         if st.sidebar.button("Cerrar sesión de administración", use_container_width=True):
             st.session_state.admin_authenticated = False
+            clear_session_activity()
             st.rerun()
         return True
 
@@ -1988,6 +2040,7 @@ def auth_logout_center():
     ]:
         st.session_state[key] = False if key == "center_authenticated" else ""
     st.session_state.director_page = "Nuevo reporte"
+    clear_session_activity()
 
 
 ACTIVATION_CODE_TTL_HOURS = 168  # 7 días
@@ -3473,12 +3526,300 @@ st.markdown('<div class="iteso-divider"></div>', unsafe_allow_html=True)
 
 # Access is handled with email + password or an administrator-issued activation code.
 
+
+# ---------- ADMIN STATISTICS / BACKUP HELPERS ----------
+def _stats_chart_png(df, label_col, value_col, title, kind="bar"):
+    """Build a compact PNG chart for Word/PDF statistical exports."""
+    if df is None or df.empty:
+        return None
+    fig, ax = plt.subplots(figsize=(8.5, 4.5))
+    labels = [str(v) for v in df[label_col].tolist()]
+    values = [float(v or 0) for v in df[value_col].tolist()]
+    if kind == "line":
+        ax.plot(labels, values, marker="o", linewidth=2)
+        ax.tick_params(axis="x", rotation=45)
+    elif len(labels) >= 6:
+        ax.barh(labels, values)
+        ax.invert_yaxis()
+    else:
+        ax.bar(labels, values)
+        ax.tick_params(axis="x", rotation=25)
+    ax.set_title(title)
+    ax.set_ylabel(value_col if kind != "barh" else "")
+    ax.grid(axis="y" if kind != "barh" else "x", alpha=0.2)
+    fig.tight_layout()
+    bio = io.BytesIO()
+    fig.savefig(bio, format="png", dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    bio.seek(0)
+    return bio.getvalue()
+
+
+def _docx_add_df_table(doc, df, max_rows=80):
+    if df is None or df.empty:
+        doc.add_paragraph("Sin datos para los filtros seleccionados.")
+        return
+    shown = df.head(max_rows)
+    table = doc.add_table(rows=1, cols=len(shown.columns))
+    table.style = "Table Grid"
+    for idx, col in enumerate(shown.columns):
+        table.rows[0].cells[idx].text = str(col)
+    for _, row in shown.iterrows():
+        cells = table.add_row().cells
+        for idx, col in enumerate(shown.columns):
+            value = row[col]
+            if pd.isna(value):
+                value = ""
+            cells[idx].text = str(value)
+    if len(df) > max_rows:
+        doc.add_paragraph(f"Se muestran las primeras {max_rows} filas de {len(df)}.")
+
+
+def _pdf_table_from_df(df, max_rows=60):
+    if df is None or df.empty:
+        return Paragraph("Sin datos para los filtros seleccionados.", getSampleStyleSheet()["BodyText"])
+    shown = df.head(max_rows).copy()
+    data = [[str(c) for c in shown.columns]]
+    for _, row in shown.iterrows():
+        values = []
+        for col in shown.columns:
+            v = row[col]
+            values.append("" if pd.isna(v) else str(v))
+        data.append(values)
+    page_width = letter[0] - 72
+    col_width = page_width / max(1, len(shown.columns))
+    table = Table(data, colWidths=[col_width] * len(shown.columns), repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), HexColor(ITESO_BLUE)),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (-1,-1), 7),
+        ("GRID", (0,0), (-1,-1), 0.35, HexColor("#D7DEE5")),
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, HexColor("#F8FAFC")]),
+        ("LEFTPADDING", (0,0), (-1,-1), 4),
+        ("RIGHTPADDING", (0,0), (-1,-1), 4),
+        ("TOPPADDING", (0,0), (-1,-1), 4),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+    ]))
+    return table
+
+
+def generate_statistics_word(selected, filter_text, summary, datasets):
+    doc = Document()
+    sec = doc.sections[0]
+    sec.top_margin = Inches(0.65)
+    sec.bottom_margin = Inches(0.65)
+    sec.left_margin = Inches(0.65)
+    sec.right_margin = Inches(0.65)
+    add_docx_page_x_of_y(sec)
+
+    p = doc.add_paragraph()
+    r = p.add_run("Estadísticas de informes mensuales")
+    r.bold = True
+    r.font.size = Pt(19)
+    r.font.color.rgb = RGBColor(0, 59, 112)
+    doc.add_paragraph("Dirección de Integración Comunitaria · ITESO")
+    doc.add_paragraph(filter_text)
+    doc.add_paragraph(f"Generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+
+    if selected.get("summary"):
+        doc.add_heading("Resumen general", level=1)
+        for label, value in summary.items():
+            doc.add_paragraph(f"{label}: {value}")
+        doc.add_paragraph(
+            "* Personas impactadas corresponde a la suma de Participantes / alcance y puede incluir personas repetidas entre actividades."
+        )
+
+    if selected.get("reports"):
+        doc.add_heading("Informes acumulados por centro", level=1)
+        df = datasets.get("reports")
+        _docx_add_df_table(doc, df)
+        img = _stats_chart_png(df, "Centro", "Informes", "Informes acumulados por centro")
+        if img:
+            doc.add_picture(io.BytesIO(img), width=Inches(6.6))
+
+    if selected.get("activities"):
+        doc.add_heading("Actividades por reporte y mes", level=1)
+        _docx_add_df_table(doc, datasets.get("activities"))
+
+    if selected.get("categories"):
+        doc.add_heading("Actividades por categoría", level=1)
+        df = datasets.get("categories")
+        img = _stats_chart_png(df, "Categoría", "Actividades", "Actividades por categoría")
+        if img:
+            doc.add_picture(io.BytesIO(img), width=Inches(6.6))
+        _docx_add_df_table(doc, df)
+
+    if selected.get("people"):
+        doc.add_heading("Personas impactadas por mes", level=1)
+        df = datasets.get("people")
+        img = _stats_chart_png(df, "Periodo", "Personas impactadas*", "Personas impactadas por mes", kind="line")
+        if img:
+            doc.add_picture(io.BytesIO(img), width=Inches(6.6))
+        _docx_add_df_table(doc, df)
+
+    bio = io.BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
+
+
+def generate_statistics_pdf(selected, filter_text, summary, datasets):
+    bio = io.BytesIO()
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        name="StatsTitle", parent=styles["Title"], textColor=HexColor(ITESO_BLUE),
+        fontSize=18, leading=21, spaceAfter=8,
+    ))
+    styles.add(ParagraphStyle(
+        name="StatsH2", parent=styles["Heading2"], textColor=HexColor(ITESO_BLUE),
+        fontSize=13, leading=16, spaceBefore=10, spaceAfter=6,
+    ))
+    story = [
+        Paragraph("Estadísticas de informes mensuales", styles["StatsTitle"]),
+        Paragraph("Dirección de Integración Comunitaria · ITESO", styles["BodyText"]),
+        Paragraph(filter_text, styles["BodyText"]),
+        Paragraph(f"Generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}", styles["BodyText"]),
+        Spacer(1, 10),
+    ]
+
+    def add_chart(img_bytes):
+        if img_bytes:
+            story.append(Image(io.BytesIO(img_bytes), width=468, height=248))
+            story.append(Spacer(1, 7))
+
+    if selected.get("summary"):
+        story.append(Paragraph("Resumen general", styles["StatsH2"]))
+        for label, value in summary.items():
+            story.append(Paragraph(f"<b>{html.escape(str(label))}:</b> {html.escape(str(value))}", styles["BodyText"]))
+        story.append(Paragraph(
+            "* Personas impactadas corresponde a la suma de Participantes / alcance y puede incluir personas repetidas entre actividades.",
+            styles["BodyText"],
+        ))
+
+    if selected.get("reports"):
+        story.append(Paragraph("Informes acumulados por centro", styles["StatsH2"]))
+        df = datasets.get("reports")
+        story.append(_pdf_table_from_df(df))
+        story.append(Spacer(1, 6))
+        add_chart(_stats_chart_png(df, "Centro", "Informes", "Informes acumulados por centro"))
+
+    if selected.get("activities"):
+        story.append(Paragraph("Actividades por reporte y mes", styles["StatsH2"]))
+        story.append(_pdf_table_from_df(datasets.get("activities")))
+
+    if selected.get("categories"):
+        story.append(Paragraph("Actividades por categoría", styles["StatsH2"]))
+        df = datasets.get("categories")
+        add_chart(_stats_chart_png(df, "Categoría", "Actividades", "Actividades por categoría"))
+        story.append(_pdf_table_from_df(df))
+
+    if selected.get("people"):
+        story.append(Paragraph("Personas impactadas por mes", styles["StatsH2"]))
+        df = datasets.get("people")
+        add_chart(_stats_chart_png(df, "Periodo", "Personas impactadas*", "Personas impactadas por mes", kind="line"))
+        story.append(_pdf_table_from_df(df))
+
+    pdf = SimpleDocTemplate(
+        bio, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=42, bottomMargin=34,
+        title="Estadísticas DIC ITESO",
+    )
+    pdf.build(story, canvasmaker=NumberedCanvas)
+    return bio.getvalue()
+
+
+def fetch_all_table_rows(table_name, page_size=1000):
+    """Retrieve all rows from a Supabase table in pages for administrator backups."""
+    if not supabase:
+        return []
+    rows = []
+    start = 0
+    while True:
+        chunk = (
+            supabase.table(table_name)
+            .select("*")
+            .range(start, start + page_size - 1)
+            .execute()
+            .data or []
+        )
+        rows.extend(chunk)
+        if len(chunk) < page_size:
+            break
+        start += page_size
+    return rows
+
+
+def generate_database_backup_zip():
+    """Create a portable ZIP backup of the application database tables (not Storage binaries)."""
+    tables = ["units", "reports", "activities", "activity_photos", "authorized_users", "audit_log"]
+    bio = io.BytesIO()
+    generated_at = datetime.utcnow().isoformat() + "Z"
+    metadata = {
+        "generated_at_utc": generated_at,
+        "application": "DIC ITESO - Informes mensuales",
+        "scope": "Postgres application tables",
+        "includes_storage_files": False,
+        "tables": {},
+    }
+    with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for table in tables:
+            try:
+                rows = fetch_all_table_rows(table)
+                metadata["tables"][table] = len(rows)
+                df = pd.DataFrame(rows)
+                zf.writestr(f"{table}.csv", df.to_csv(index=False).encode("utf-8-sig"))
+                zf.writestr(
+                    f"{table}.json",
+                    json.dumps(rows, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
+                )
+            except Exception as exc:
+                metadata["tables"][table] = f"ERROR: {exc}"
+        readme = (
+            "RESPALDO DIC ITESO\n\n"
+            "Este archivo contiene una exportación de las tablas de la base de datos de la aplicación "
+            "en formatos CSV y JSON.\n\n"
+            "No incluye los archivos binarios almacenados en Supabase Storage (fotografías y gráficas); "
+            "sí incluye las rutas de Storage registradas en las tablas.\n"
+            "Las contraseñas de usuarios no forman parte de estas tablas y no se incluyen.\n"
+        )
+        zf.writestr("README.txt", readme.encode("utf-8"))
+        zf.writestr("metadata.json", json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8"))
+    bio.seek(0)
+    return bio.getvalue(), metadata
+
+
 # ---------- ACCESS ----------
 with st.sidebar:
     st.markdown("### Acceso")
     profile = st.radio("Perfil", ["Centro / Dirección", "Administración DIC"], label_visibility="collapsed")
     st.caption(f"Base de datos: **{db_mode()}**")
     st.divider()
+
+if st.session_state.get("session_timeout_message"):
+    st.warning(st.session_state.pop("session_timeout_message"))
+
+if enforce_session_timeout():
+    st.rerun()
+
+@st.fragment(run_every="60s")
+def session_timeout_watchdog():
+    """Check idle authenticated sessions once per minute without refreshing activity."""
+    authenticated = bool(
+        st.session_state.get("admin_authenticated")
+        or st.session_state.get("center_authenticated")
+    )
+    last = st.session_state.get("last_activity_at")
+    if authenticated and last is not None and time.time() - float(last) >= SESSION_TIMEOUT_SECONDS:
+        if st.session_state.get("center_authenticated"):
+            auth_logout_center()
+        st.session_state.admin_authenticated = False
+        clear_session_activity()
+        st.session_state.session_timeout_message = (
+            "La sesión se cerró automáticamente después de 30 minutos sin actividad."
+        )
+        st.rerun()
+
+session_timeout_watchdog()
 
 if profile == "Centro / Dirección":
     with st.sidebar:
@@ -3509,6 +3850,7 @@ if profile == "Centro / Dirección":
                     st.session_state.center_user_role = user.get("role", "")
                     st.session_state.validated_center_email = user.get("email", sender_email).lower()
                     st.session_state.director_page = "Nuevo reporte"
+                    mark_session_activity()
                     st.rerun()
                 else:
                     st.error(msg)
@@ -4049,7 +4391,7 @@ else:
     with st.sidebar:
         page = st.radio(
             "Menú",
-            ["Seguimiento mensual", "Estadísticas", "Usuarios y accesos", "Informe consolidado", "Buscador histórico"]
+            ["Seguimiento mensual", "Estadísticas", "Usuarios y accesos", "Respaldos", "Informe consolidado", "Buscador histórico"]
         )
         st.divider()
         st.markdown("### Herramientas")
@@ -4182,8 +4524,8 @@ else:
     elif page == "Estadísticas":
         st.header("Estadísticas")
         st.caption(
-            "Vista acumulada de los informes y actividades capturados por los centros. "
-            "Los datos se actualizan automáticamente con la información guardada en la aplicación."
+            "Selecciona los resultados que quieras integrar en la vista previa y en la descarga Word/PDF. "
+            "Los filtros se aplican a todos los resultados."
         )
 
         all_reports = get_reports()
@@ -4192,28 +4534,21 @@ else:
         if not all_reports:
             st.info("Todavía no hay informes guardados para construir estadísticas.")
         else:
-            # ---------- Filtros ----------
             years_available = sorted(
                 {int(r.get("year")) for r in all_reports if r.get("year") is not None}
             )
             f1, f2, f3 = st.columns(3)
             with f1:
                 stat_center = st.selectbox(
-                    "Centro",
-                    ["Todos"] + list(UNITS.keys()),
-                    key="stats_center",
+                    "Centro", ["Todos"] + list(UNITS.keys()), key="stats_center"
                 )
             with f2:
                 stat_year = st.selectbox(
-                    "Año",
-                    ["Todos"] + years_available,
-                    key="stats_year",
+                    "Año", ["Todos"] + years_available, key="stats_year"
                 )
             with f3:
                 stat_status_label = st.selectbox(
-                    "Estatus",
-                    ["Todos", "Enviados", "Borradores"],
-                    key="stats_status",
+                    "Estatus", ["Todos", "Enviados", "Borradores"], key="stats_status"
                 )
 
             filtered_reports = list(all_reports)
@@ -4236,46 +4571,17 @@ else:
             total_people = sum(int(a.get("participants") or 0) for a in filtered_activities)
             centers_with_reports = len({r.get("unit_code") for r in filtered_reports})
 
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Informes", total_reports)
-            m2.metric("Actividades", total_activities)
-            m3.metric("Personas impactadas*", f"{total_people:,}")
-            m4.metric("Centros con informes", centers_with_reports)
-            st.caption(
-                "* Personas impactadas corresponde a la suma del campo **Participantes / alcance**. "
-                "Una misma persona puede estar contabilizada en más de una actividad."
-            )
-
-            st.divider()
-
-            # ---------- Informes acumulados por centro ----------
-            st.subheader("Informes acumulados por centro")
+            month_order = {m: i + 1 for i, m in enumerate(MONTHS)}
             report_counts = []
             for code, full_name in UNITS.items():
                 count = sum(1 for r in filtered_reports if r.get("unit_code") == code)
-                report_counts.append({
-                    "Centro": code,
-                    "Nombre": full_name,
-                    "Informes": count,
-                })
+                report_counts.append({"Centro": code, "Nombre": full_name, "Informes": count})
             report_counts_df = pd.DataFrame(report_counts)
-            c1, c2 = st.columns([1.15, 1.85])
-            with c1:
-                st.dataframe(report_counts_df, use_container_width=True, hide_index=True)
-            with c2:
-                chart_reports = report_counts_df[["Centro", "Informes"]].set_index("Centro")
-                st.bar_chart(chart_reports, use_container_width=True)
 
-            st.divider()
-
-            # ---------- Actividades por reporte / mes ----------
-            st.subheader("Actividades por reporte y mes")
-            month_order = {m: i + 1 for i, m in enumerate(MONTHS)}
             report_activity_rows = []
             activities_by_report = {}
             for a in filtered_activities:
                 activities_by_report.setdefault(a.get("report_id"), []).append(a)
-
             for r in filtered_reports:
                 acts = activities_by_report.get(r.get("id"), [])
                 report_activity_rows.append({
@@ -4287,46 +4593,30 @@ else:
                     "Personas impactadas*": sum(int(a.get("participants") or 0) for a in acts),
                     "_mes_orden": month_order.get(r.get("month"), 99),
                 })
-
             if report_activity_rows:
                 report_activity_df = pd.DataFrame(report_activity_rows).sort_values(
-                    ["Año", "_mes_orden", "Centro"],
-                    ascending=[False, False, True],
-                )
-                report_activity_df = report_activity_df.drop(columns=["_mes_orden"])
-                st.dataframe(report_activity_df, use_container_width=True, hide_index=True)
+                    ["Año", "_mes_orden", "Centro"], ascending=[False, False, True]
+                ).drop(columns=["_mes_orden"])
             else:
-                st.info("No hay reportes que coincidan con los filtros seleccionados.")
+                report_activity_df = pd.DataFrame(
+                    columns=["Año", "Mes", "Centro", "Estatus", "Actividades", "Personas impactadas*"]
+                )
 
-            st.divider()
-
-            # ---------- Categorías ----------
-            st.subheader("Actividades por categoría")
             category_counts = {}
             for a in filtered_activities:
                 category = (a.get("category") or "Sin categoría").strip() or "Sin categoría"
                 category_counts[category] = category_counts.get(category, 0) + 1
-
-            if category_counts:
-                category_df = pd.DataFrame(
-                    [
-                        {"Categoría": category, "Actividades": count}
-                        for category, count in category_counts.items()
-                    ]
-                ).sort_values(["Actividades", "Categoría"], ascending=[False, True])
-                st.bar_chart(
-                    category_df.set_index("Categoría"),
-                    use_container_width=True,
-                    horizontal=True,
+            category_df = pd.DataFrame([
+                {"Categoría": category, "Actividades": count}
+                for category, count in category_counts.items()
+            ])
+            if not category_df.empty:
+                category_df = category_df.sort_values(
+                    ["Actividades", "Categoría"], ascending=[False, True]
                 )
-                st.dataframe(category_df, use_container_width=True, hide_index=True)
             else:
-                st.info("No hay actividades que coincidan con los filtros seleccionados.")
+                category_df = pd.DataFrame(columns=["Categoría", "Actividades"])
 
-            st.divider()
-
-            # ---------- Personas impactadas por mes ----------
-            st.subheader("Personas impactadas por mes")
             report_lookup = {r.get("id"): r for r in filtered_reports}
             monthly_people = {}
             for a in filtered_activities:
@@ -4338,23 +4628,141 @@ else:
                 month_num = month_order.get(month, 99)
                 key = (year, month_num, month)
                 monthly_people[key] = monthly_people.get(key, 0) + int(a.get("participants") or 0)
-
-            if monthly_people:
-                monthly_rows = []
-                for (year, month_num, month), people in sorted(monthly_people.items()):
-                    monthly_rows.append({
-                        "Periodo": f"{month[:3]} {year}",
-                        "Personas impactadas*": people,
-                        "_orden": year * 100 + month_num,
-                    })
+            monthly_rows = []
+            for (year, month_num, month), people in sorted(monthly_people.items()):
+                monthly_rows.append({
+                    "Periodo": f"{month[:3]} {year}",
+                    "Personas impactadas*": people,
+                    "_orden": year * 100 + month_num,
+                })
+            if monthly_rows:
                 monthly_df = pd.DataFrame(monthly_rows).sort_values("_orden").drop(columns=["_orden"])
-                st.line_chart(
-                    monthly_df.set_index("Periodo"),
-                    use_container_width=True,
-                )
-                st.dataframe(monthly_df, use_container_width=True, hide_index=True)
             else:
-                st.info("No hay información de participantes para los filtros seleccionados.")
+                monthly_df = pd.DataFrame(columns=["Periodo", "Personas impactadas*"])
+
+            st.markdown("### Selección para vista previa y descarga")
+            s1, s2, s3 = st.columns(3)
+            with s1:
+                include_summary = st.checkbox("Resumen general", value=True, key="stats_sel_summary")
+                include_reports = st.checkbox("Informes acumulados por centro", value=True, key="stats_sel_reports")
+            with s2:
+                include_activities = st.checkbox("Actividades por reporte y mes", value=True, key="stats_sel_activities")
+                include_categories = st.checkbox("Actividades por categoría", value=True, key="stats_sel_categories")
+            with s3:
+                include_people = st.checkbox("Personas impactadas por mes", value=True, key="stats_sel_people")
+
+            selected_stats = {
+                "summary": include_summary,
+                "reports": include_reports,
+                "activities": include_activities,
+                "categories": include_categories,
+                "people": include_people,
+            }
+            any_selected = any(selected_stats.values())
+
+            center_text = "Todos los centros" if stat_center == "Todos" else stat_center
+            year_text = "Todos los años" if stat_year == "Todos" else str(stat_year)
+            filter_text = f"Filtros: {center_text} · {year_text} · {stat_status_label}"
+            summary = {
+                "Informes": total_reports,
+                "Actividades": total_activities,
+                "Personas impactadas*": f"{total_people:,}",
+                "Centros con informes": centers_with_reports,
+            }
+            datasets = {
+                "reports": report_counts_df,
+                "activities": report_activity_df,
+                "categories": category_df,
+                "people": monthly_df,
+            }
+
+            b1, b2 = st.columns([1, 3])
+            with b1:
+                if st.button(
+                    "Previsualizar selección", type="primary", use_container_width=True,
+                    disabled=not any_selected,
+                ):
+                    st.session_state.stats_preview_enabled = True
+            with b2:
+                st.caption(filter_text)
+
+            if st.session_state.stats_preview_enabled and any_selected:
+                st.divider()
+                st.subheader("Vista previa de estadísticas seleccionadas")
+
+                if include_summary:
+                    with st.container(border=True):
+                        st.markdown("#### Resumen general")
+                        m1, m2, m3, m4 = st.columns(4)
+                        m1.metric("Informes", total_reports)
+                        m2.metric("Actividades", total_activities)
+                        m3.metric("Personas impactadas*", f"{total_people:,}")
+                        m4.metric("Centros con informes", centers_with_reports)
+
+                if include_reports:
+                    with st.container(border=True):
+                        st.markdown("#### Informes acumulados por centro")
+                        c1, c2 = st.columns([1.15, 1.85])
+                        with c1:
+                            st.dataframe(report_counts_df, use_container_width=True, hide_index=True)
+                        with c2:
+                            st.bar_chart(report_counts_df[["Centro", "Informes"]].set_index("Centro"), use_container_width=True)
+
+                if include_activities:
+                    with st.container(border=True):
+                        st.markdown("#### Actividades por reporte y mes")
+                        if report_activity_df.empty:
+                            st.info("No hay reportes que coincidan con los filtros seleccionados.")
+                        else:
+                            st.dataframe(report_activity_df, use_container_width=True, hide_index=True)
+
+                if include_categories:
+                    with st.container(border=True):
+                        st.markdown("#### Actividades por categoría")
+                        if category_df.empty:
+                            st.info("No hay actividades que coincidan con los filtros seleccionados.")
+                        else:
+                            st.bar_chart(category_df.set_index("Categoría"), use_container_width=True, horizontal=True)
+                            st.dataframe(category_df, use_container_width=True, hide_index=True)
+
+                if include_people:
+                    with st.container(border=True):
+                        st.markdown("#### Personas impactadas por mes")
+                        if monthly_df.empty:
+                            st.info("No hay información de participantes para los filtros seleccionados.")
+                        else:
+                            st.line_chart(monthly_df.set_index("Periodo"), use_container_width=True)
+                            st.dataframe(monthly_df, use_container_width=True, hide_index=True)
+
+                st.caption(
+                    "* Personas impactadas corresponde a la suma del campo Participantes / alcance. "
+                    "Una misma persona puede estar contabilizada en más de una actividad."
+                )
+
+                word_stats = generate_statistics_word(selected_stats, filter_text, summary, datasets)
+                pdf_stats = generate_statistics_pdf(selected_stats, filter_text, summary, datasets)
+                d1, d2 = st.columns(2)
+                stamp = datetime.now().strftime("%Y%m%d_%H%M")
+                with d1:
+                    st.download_button(
+                        "⬇️ Descargar selección en Word",
+                        data=word_stats,
+                        file_name=f"Estadisticas_DIC_{stamp}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        use_container_width=True,
+                        on_click="ignore",
+                    )
+                with d2:
+                    st.download_button(
+                        "⬇️ Descargar selección en PDF",
+                        data=pdf_stats,
+                        file_name=f"Estadisticas_DIC_{stamp}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                        on_click="ignore",
+                    )
+            elif not any_selected:
+                st.info("Selecciona al menos un resultado para previsualizarlo o descargarlo.")
 
             st.caption(
                 "Esta es la primera versión del módulo estadístico. Después podemos incorporar indicadores, "
@@ -4524,6 +4932,52 @@ else:
                     key=f"delete_authorized_user_{selected_email}",
                 ):
                     delete_authorized_user_dialog(selected_user)
+
+
+    elif page == "Respaldos":
+        st.header("Respaldos")
+        st.caption(
+            "Genera una copia descargable de las tablas de la base de datos. "
+            "El respaldo se entrega en un archivo ZIP con cada tabla en CSV y JSON."
+        )
+        st.info(
+            "Este respaldo incluye datos de usuarios autorizados, informes, actividades, referencias de fotografías, "
+            "unidades y bitácora. No incluye las fotografías/gráficas binarias de Supabase Storage; sus rutas sí quedan respaldadas."
+        )
+
+        if not supabase:
+            st.warning("El respaldo de base de datos sólo está disponible cuando la aplicación está conectada a Supabase.")
+        else:
+            if st.button("Preparar respaldo de base de datos", type="primary", use_container_width=True):
+                with st.spinner("Preparando respaldo..."):
+                    try:
+                        backup_bytes, backup_meta = generate_database_backup_zip()
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        st.session_state.database_backup_bytes = backup_bytes
+                        st.session_state.database_backup_filename = f"Respaldo_DIC_{timestamp}.zip"
+                        st.session_state.database_backup_meta = backup_meta
+                    except Exception as exc:
+                        st.session_state.database_backup_bytes = None
+                        st.error(f"No fue posible generar el respaldo. Detalle: {exc}")
+
+            if st.session_state.get("database_backup_bytes"):
+                meta = st.session_state.get("database_backup_meta") or {}
+                table_counts = meta.get("tables") or {}
+                st.success("Respaldo preparado correctamente.")
+                if table_counts:
+                    rows = [{"Tabla": k, "Registros": v} for k, v in table_counts.items()]
+                    st.dataframe(rows, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Descargar respaldo ZIP",
+                    data=st.session_state.database_backup_bytes,
+                    file_name=st.session_state.database_backup_filename or "Respaldo_DIC.zip",
+                    mime="application/zip",
+                    use_container_width=True,
+                    on_click="ignore",
+                )
+                st.caption(
+                    "Recomendación: guarda el ZIP en un espacio institucional seguro y genera un respaldo periódico."
+                )
 
 
     elif page == "Informe consolidado":
@@ -4782,4 +5236,4 @@ else:
             st.info("Escribe una palabra o tema para buscar en el histórico.")
 
 st.divider()
-st.caption("Prototipo V1.30 · Dirección de Integración Comunitaria · ITESO")
+st.caption("Prototipo V1.31 · Dirección de Integración Comunitaria · ITESO")
