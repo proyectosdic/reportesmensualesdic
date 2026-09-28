@@ -279,21 +279,21 @@ p, label, span {{
 }}
 
 /* Guardar acción: verde, sin afectar los demás botones de la aplicación */
-div[class*="st-key-save_action_bar_"] .stButton > button {
+div[class*="st-key-save_action_bar_"] .stButton > button {{
     background: #17823B !important;
     border-color: #17823B !important;
     color: #FFFFFF !important;
-}
-div[class*="st-key-save_action_bar_"] .stButton > button:hover {
+}}
+div[class*="st-key-save_action_bar_"] .stButton > button:hover {{
     background: #116A30 !important;
     border-color: #116A30 !important;
     color: #FFFFFF !important;
-}
-div[class*="st-key-save_action_bar_"] .stButton > button:disabled {
+}}
+div[class*="st-key-save_action_bar_"] .stButton > button:disabled {{
     background: #DDEBE1 !important;
     border-color: #B7D5C0 !important;
     color: #66836E !important;
-}
+}}
 
 </style>
 """, unsafe_allow_html=True)
@@ -7376,4 +7376,4 @@ else:
             st.info("Escribe una palabra o tema para buscar en el histórico.")
 
 st.divider()
-st.caption("Prototipo V1.37 · Dirección de Integración Comunitaria · ITESO")
+st.caption("Prototipo V1.38 · Dirección de Integración Comunitaria · ITESO")
