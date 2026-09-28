@@ -74,20 +74,35 @@ MONTHS = [
     "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"
 ]
 
-CATEGORIES = [
-    "Formación",
-    "Vinculación interna",
-    "Vinculación externa",
-    "Incidencia social",
-    "Cultura",
-    "Salud y bienestar",
-    "Deporte",
-    "Pastoral / identidad ignaciana",
-    "Derechos humanos",
-    "Inclusión",
-    "Sustentabilidad",
+REPORT_RUBRICS = {
+    "Vida universitaria": "Acciones para la comunidad universitaria: estudiantes, egresados, académicos y personal. Incluye procesos formativos no curriculares.",
+    "Vinculación externa": "Acciones en alianza con instituciones o grupos externos, acuerdos o convenios y representación institucional.",
+    "Desarrollo institucional": "Participación en comisiones institucionales, procesos de planeación, reestructura y mejora.",
+    "Capacitación y formación del personal": "Talleres, cursos y seminarios dirigidos al propio equipo del centro; no incluye la formación que el centro ofrece hacia fuera.",
+    "Participación en medios de difusión": "Apariciones en medios generalistas y redes sociales. Los productos científicos se reportan en Investigación.",
+    "Oferta académica y docencia": "Materias curriculares de la DIC y participación docente. Se reporta únicamente en los tres cortes académicos del año.",
+    "Investigación": "Proyectos, hitos, productos concluidos, participación en foros y difusión de investigación. Se reporta en enero y agosto.",
+}
+CATEGORIES = list(REPORT_RUBRICS.keys())
+ACTION_PURPOSES = ["Formativa", "Incidencia", "Producción de conocimiento", "Gestión"]
+ACTION_TYPES = ["Actividad", "Proceso", "Servicio"]
+INCLUSION_CRITERIA = [
+    "Atiende la misión del centro",
+    "Trabajo colaborativo con otra instancia",
+    "Relevante — Planeación institucional",
+    "Relevante — Encargo de autoridades",
     "Otro",
 ]
+TARGET_POPULATIONS = [
+    "Estudiantes", "Egresados", "Académicos", "Personal administrativo",
+    "Personal operativo", "Comunidad externa",
+]
+MEDIA_TYPES = ["Entrevista", "Nota", "Artículo", "Podcast", "Video", "Redes sociales", "Otro"]
+RESEARCH_PARTICIPATION = ["Responsable / titular", "Colaborador", "Otro"]
+RESEARCH_PROGRESS = ["Inicio", "En proceso", "Concluido"]
+ACADEMIC_SEMESTERS = ["Primavera", "Verano", "Otoño"]
+ACADEMIC_REPORTING_MONTHS = {"Enero", "Mayo", "Agosto"}  # Configurable si la DIC define otros cortes.
+RESEARCH_REPORTING_MONTHS = {"Enero", "Agosto"}
 
 # ---------- STYLE ----------
 st.markdown(f"""
@@ -354,9 +369,17 @@ SESSION_TIMEOUT_SECONDS = 30 * 60
 def clear_center_capture_state(reset_period=False):
     """Clear all temporary director-capture data from the current Streamlit session."""
     prefixes = (
-        "title_", "desc_", "cat_", "other_cat_", "rank_", "part_",
-        "photos_", "social_", "chart_", "chart_title_",
-        "existing_photos_", "existing_chart_",
+        "title_", "desc_", "cat_", "other_cat_", "rank_", "part_", "rubro_",
+        "purpose_", "action_type_", "criteria_", "criteria_other_", "activity_date_",
+        "location_", "population_", "external_population_", "dic_collab_", "dic_units_",
+        "relevance_note_", "media_type_", "media_platform_", "media_topic_", "media_link_",
+        "academic_semester_", "academic_credits_", "academic_opened_", "academic_groups_",
+        "academic_fixed_prof_", "academic_variable_prof_", "faculty_name_", "faculty_contract_",
+        "faculty_unit_", "faculty_category_", "faculty_promotion_", "research_role_",
+        "research_members_", "research_field_", "research_actors_", "research_start_",
+        "research_end_", "research_progress_", "research_products_", "research_pct_",
+        "research_on_plan_", "research_on_plan_why_", "photos_", "social_", "chart_",
+        "chart_title_", "existing_photos_", "existing_chart_",
     )
     exact_keys = {
         "show_center_preview",
@@ -366,6 +389,9 @@ def clear_center_capture_state(reset_period=False):
         "docx_import_warnings",
         "docx_import_filename",
         "director_docx_upload",
+        "highlight_selection", "learning_planning_advances", "learning_risks",
+        "learning_opportunity", "media_appearances", "media_total_participations",
+        "media_reach",
     }
 
     for key in list(st.session_state.keys()):
@@ -389,7 +415,19 @@ def clear_center_capture_state(reset_period=False):
         st.session_state.capture_year = datetime.now().year
 
 
-def save_report(unit, month, year, status, sender_email=""):
+def save_report(unit, month, year, status, sender_email="", report_extras=None):
+    """Create/update the monthly report and persist the new report-level reflection blocks."""
+    report_extras = report_extras or {}
+    payload_extras = {
+        k: v for k, v in {
+            "monthly_highlights": report_extras.get("monthly_highlights"),
+            "learning_planning_advances": report_extras.get("learning_planning_advances"),
+            "learning_risks": report_extras.get("learning_risks"),
+            "learning_opportunity": report_extras.get("learning_opportunity"),
+            "media_monthly_summary": report_extras.get("media_monthly_summary"),
+            "form_version": "2026-09-24",
+        }.items() if v is not None
+    }
     if supabase:
         existing = (
             supabase.table("reports")
@@ -401,29 +439,33 @@ def save_report(unit, month, year, status, sender_email=""):
         )
         if existing.data:
             rid = existing.data[0]["id"]
-            supabase.table("reports").update({
+            payload = {
                 "status": status,
                 "sender_email": sender_email,
                 "submitted_at": datetime.utcnow().isoformat() if status == "ENVIADO" else None,
                 "updated_at": datetime.utcnow().isoformat(),
-            }).eq("id", rid).execute()
+                **payload_extras,
+            }
+            supabase.table("reports").update(payload).eq("id", rid).execute()
             return rid
-        res = supabase.table("reports").insert({
+        payload = {
             "unit_code": unit,
             "month": month,
             "year": year,
             "status": status,
             "sender_email": sender_email,
-        }).execute()
+            **payload_extras,
+        }
+        res = supabase.table("reports").insert(payload).execute()
         return res.data[0]["id"]
 
-    # Demo session storage
     found = next((r for r in st.session_state.demo_reports
                   if r["unit_code"] == unit and r["month"] == month and r["year"] == year), None)
     if found:
         found["status"] = status
         found["sender_email"] = sender_email
         found["updated_at"] = datetime.now().isoformat()
+        found.update(payload_extras)
         if status == "ENVIADO":
             found["submitted_at"] = datetime.now().isoformat()
         return found["id"]
@@ -433,6 +475,7 @@ def save_report(unit, month, year, status, sender_email=""):
         "status": status, "sender_email": sender_email,
         "submitted_at": datetime.now().isoformat() if status == "ENVIADO" else None,
         "created_at": datetime.now().isoformat(),
+        **payload_extras,
     })
     return rid
 
@@ -503,6 +546,16 @@ def replace_activities(report_id, activities, actor_role="DIRECTOR"):
                 ),
                 "activity_date": a.get("activity_date").isoformat() if a.get("activity_date") else None,
                 "participants": a.get("participants"),
+                "action_purpose": a.get("action_purpose"),
+                "action_type": a.get("action_type"),
+                "inclusion_criteria": a.get("inclusion_criteria") or [],
+                "location": a.get("location"),
+                "target_population": a.get("target_population") or [],
+                "target_external_name": a.get("target_external_name"),
+                "dic_collaboration": a.get("dic_collaboration"),
+                "dic_collaboration_units": a.get("dic_collaboration_units"),
+                "relevance_note": a.get("relevance_note"),
+                "detail_data": a.get("detail_data") or {},
                 "social_url": normalize_social_url(a.get("social_url")),
                 "chart_title": (a.get("chart_title") or "").strip() or None,
                 "chart_storage_path": None,
@@ -671,6 +724,16 @@ def replace_activities(report_id, activities, actor_role="DIRECTOR"):
             "ranking": a["ranking"] if str(actor_role).upper() == "DIRECTOR" else None,
             "activity_date": a.get("activity_date"),
             "participants": a.get("participants"),
+            "action_purpose": a.get("action_purpose"),
+            "action_type": a.get("action_type"),
+            "inclusion_criteria": a.get("inclusion_criteria") or [],
+            "location": a.get("location"),
+            "target_population": a.get("target_population") or [],
+            "target_external_name": a.get("target_external_name"),
+            "dic_collaboration": a.get("dic_collaboration"),
+            "dic_collaboration_units": a.get("dic_collaboration_units"),
+            "relevance_note": a.get("relevance_note"),
+            "detail_data": a.get("detail_data") or {},
             "social_url": normalize_social_url(a.get("social_url")),
             "chart_title": a.get("chart_title"),
             "chart_storage_path": None,
@@ -879,17 +942,19 @@ class NumberedCanvas(canvas.Canvas):
         self.restoreState()
 
 
-def render_center_preview(unit, month, year, activities):
+def render_center_preview(unit, month, year, activities, report_extras=None):
+    report_extras = report_extras or {}
     st.markdown(f"### Vista previa · {unit}")
     st.caption(f"{UNITS[unit]} · {month} {year}")
     for i, act in enumerate(activities, start=1):
         with st.container(border=True):
             st.markdown(f"#### {i}. {act['title']}")
             meta = [act.get("category", ""), rank_label(act.get("ranking"))]
-            if act.get("participants"):
-                meta.append(f"Participantes / alcance: {act['participants']}")
             st.caption(" · ".join([x for x in meta if x]))
-            st.write(act.get("description", ""))
+            for label, value in activity_detail_lines(act):
+                st.markdown(f"**{label}:** {value}")
+            if act.get("description"):
+                st.write(act.get("description", ""))
             if act.get("social_url"):
                 render_social_preview(act["social_url"], key_suffix=f"preview_{i}")
             chart = current_uploaded_chart(act)
@@ -902,6 +967,22 @@ def render_center_preview(unit, month, year, activities):
                 for idx, ph in enumerate(photos):
                     with cols[idx % len(cols)]:
                         st.image(ph["bytes"], use_container_width=True)
+
+    highlights = report_extras.get("monthly_highlights") or []
+    if highlights:
+        st.markdown("### Lo más relevante del mes")
+        for h in highlights:
+            st.markdown(f"**Top {h.get('ranking')} · {h.get('title','')}**")
+            st.write(h.get("why") or "")
+
+    if any(report_extras.get(k) for k in ["learning_planning_advances", "learning_risks", "learning_opportunity"]):
+        st.markdown("### Aprendizajes")
+        st.markdown("**Avances sustantivos en los objetivos de planeación**")
+        st.write(report_extras.get("learning_planning_advances") or "")
+        st.markdown("**Acciones paradas, en riesgo o que requieren decisiones**")
+        st.write(report_extras.get("learning_risks") or "")
+        st.markdown("**Aprendizaje u oportunidad derivado del trabajo mensual**")
+        st.write(report_extras.get("learning_opportunity") or "")
 
 
 def render_consolidated_preview(month, year, reports, activities_by_report):
@@ -974,81 +1055,282 @@ def rank_label(v):
 
 
 
+def available_rubrics_for_month(month, include_current=None):
+    """Return the rubrics that should be offered for the selected reporting month."""
+    rubrics = [
+        "Vida universitaria",
+        "Vinculación externa",
+        "Desarrollo institucional",
+        "Capacitación y formación del personal",
+        "Participación en medios de difusión",
+    ]
+    if month in ACADEMIC_REPORTING_MONTHS:
+        rubrics.append("Oferta académica y docencia")
+    if month in RESEARCH_REPORTING_MONTHS:
+        rubrics.append("Investigación")
+    if include_current and include_current not in rubrics and include_current in REPORT_RUBRICS:
+        rubrics.append(include_current)
+    return rubrics
+
+
+def activity_from_session(index, actor_role=None, month=None):
+    """Build one normalized activity record from Streamlit state and return validation messages."""
+    actor_role = (actor_role or st.session_state.get("center_user_role") or "").upper()
+    month = month or st.session_state.get("capture_month") or MONTHS[datetime.now().month - 1]
+    rubro = st.session_state.get(f"rubro_{index}") or st.session_state.get(f"cat_{index}") or CATEGORIES[0]
+    title = (st.session_state.get(f"title_{index}") or "").strip()
+    desc = (st.session_state.get(f"desc_{index}") or "").strip()
+    participants = int(st.session_state.get(f"part_{index}", 0) or 0)
+    photos = st.session_state.get(f"photos_{index}", []) or []
+    existing_photos = st.session_state.get(f"existing_photos_{index}", []) or []
+    chart = st.session_state.get(f"chart_{index}")
+    existing_chart = st.session_state.get(f"existing_chart_{index}")
+    chart_title = (st.session_state.get(f"chart_title_{index}") or "").strip()
+    social_url = (st.session_state.get(f"social_{index}") or "").strip()
+    relevance_note = (st.session_state.get(f"relevance_note_{index}") or "").strip()
+    detail = {}
+    missing = []
+
+    # An activity is considered started only when the user enters substantive content.
+    started = bool(title or desc or participants or photos or existing_photos or chart or existing_chart or social_url)
+    if rubro == "Participación en medios de difusión":
+        started = started or bool(st.session_state.get(f"media_platform_{index}") or st.session_state.get(f"media_topic_{index}"))
+    elif rubro == "Oferta académica y docencia":
+        started = started or bool(st.session_state.get(f"faculty_name_{index}"))
+    elif rubro == "Investigación":
+        started = started or bool(st.session_state.get(f"research_members_{index}") or st.session_state.get(f"research_field_{index}"))
+
+    if not started:
+        return None, []
+
+    record = {
+        "title": title,
+        "description": desc,
+        "category": rubro,
+        "ranking": None,
+        "participants": participants or None,
+        "activity_date": st.session_state.get(f"activity_date_{index}"),
+        "action_purpose": None,
+        "action_type": None,
+        "inclusion_criteria": [],
+        "location": None,
+        "target_population": [],
+        "target_external_name": None,
+        "dic_collaboration": None,
+        "dic_collaboration_units": None,
+        "relevance_note": relevance_note or None,
+        "detail_data": detail,
+        "photos": photos,
+        "social_url": normalize_social_url(social_url),
+        "chart": chart,
+        "chart_title": chart_title,
+        "existing_photos": existing_photos,
+        "existing_chart": existing_chart,
+    }
+
+    if rubro in {
+        "Vida universitaria", "Vinculación externa", "Desarrollo institucional",
+        "Capacitación y formación del personal"
+    }:
+        purpose = st.session_state.get(f"purpose_{index}") or ""
+        action_type = st.session_state.get(f"action_type_{index}") or ""
+        criteria = st.session_state.get(f"criteria_{index}", []) or []
+        criteria_other = (st.session_state.get(f"criteria_other_{index}") or "").strip()
+        location = (st.session_state.get(f"location_{index}") or "").strip()
+        population = st.session_state.get(f"population_{index}", []) or []
+        external_name = (st.session_state.get(f"external_population_{index}") or "").strip()
+        collab = st.session_state.get(f"dic_collab_{index}", "No")
+        dic_units = (st.session_state.get(f"dic_units_{index}") or "").strip()
+        if criteria_other and "Otro" in criteria:
+            criteria = [x for x in criteria if x != "Otro"] + [f"Otro: {criteria_other}"]
+        record.update({
+            "action_purpose": purpose or None,
+            "action_type": action_type or None,
+            "inclusion_criteria": criteria,
+            "location": location or None,
+            "target_population": population,
+            "target_external_name": external_name or None,
+            "dic_collaboration": collab == "Sí",
+            "dic_collaboration_units": dic_units or None,
+        })
+        if not title: missing.append("título de la acción")
+        if not purpose: missing.append("fin de la acción")
+        if not action_type: missing.append("tipo de acción")
+        if not criteria: missing.append("criterio(s) de inclusión")
+        if not location: missing.append("lugar")
+        if participants <= 0: missing.append("número de participantes")
+        if not population: missing.append("población a la que está dirigida")
+        if "Comunidad externa" in population and not external_name:
+            missing.append("nombre de la comunidad/institución externa")
+        if collab == "Sí" and not dic_units:
+            missing.append("instancias DIC que colaboran")
+        if not desc: missing.append("descripción breve")
+        if not relevance_note: missing.append("por qué importa / qué conviene que la dirección sepa")
+
+    elif rubro == "Participación en medios de difusión":
+        media_type = st.session_state.get(f"media_type_{index}") or ""
+        platform = (st.session_state.get(f"media_platform_{index}") or "").strip()
+        topic = (st.session_state.get(f"media_topic_{index}") or title).strip()
+        link = (st.session_state.get(f"media_link_{index}") or social_url).strip()
+        record["title"] = topic
+        record["description"] = f"{media_type} en {platform}. Tema: {topic}".strip()
+        record["social_url"] = normalize_social_url(link)
+        record["participants"] = None
+        record["relevance_note"] = None
+        detail.update({"participation_type": media_type, "platform": platform, "topic": topic, "link": normalize_social_url(link)})
+        if not media_type: missing.append("tipo de participación")
+        if not platform: missing.append("medio o plataforma")
+        if not topic: missing.append("tema de la participación")
+        if link and not social_url_is_valid(normalize_social_url(link)): missing.append("enlace válido")
+
+    elif rubro == "Oferta académica y docencia":
+        semester = st.session_state.get(f"academic_semester_{index}") or ""
+        credits = int(st.session_state.get(f"academic_credits_{index}", 0) or 0)
+        opened = st.session_state.get(f"academic_opened_{index}") or ""
+        groups = int(st.session_state.get(f"academic_groups_{index}", 0) or 0)
+        fixed_prof = int(st.session_state.get(f"academic_fixed_prof_{index}", 0) or 0)
+        variable_prof = int(st.session_state.get(f"academic_variable_prof_{index}", 0) or 0)
+        faculty_name = (st.session_state.get(f"faculty_name_{index}") or "").strip()
+        faculty_contract = st.session_state.get(f"faculty_contract_{index}") or ""
+        faculty_unit = (st.session_state.get(f"faculty_unit_{index}") or "").strip()
+        faculty_category = st.session_state.get(f"faculty_category_{index}") or ""
+        faculty_promotion = st.session_state.get(f"faculty_promotion_{index}") or ""
+        detail.update({
+            "semester": semester, "credits": credits, "opened": opened, "groups": groups,
+            "fixed_professors": fixed_prof, "variable_professors": variable_prof,
+            "faculty_name": faculty_name, "faculty_contract": faculty_contract,
+            "faculty_unit": faculty_unit, "faculty_category": faculty_category,
+            "faculty_promotion": faculty_promotion,
+        })
+        record["description"] = (
+            f"{semester}. Créditos: {credits}. Se abrió: {opened}. Grupos: {groups}. "
+            f"Profesores tiempo fijo: {fixed_prof}; tiempo variable: {variable_prof}."
+        )
+        record["participants"] = None
+        if not title: missing.append("nombre del curso ofertado")
+        if not semester: missing.append("semestre")
+        if credits <= 0: missing.append("créditos")
+        if not opened: missing.append("si el curso se abrió")
+        if opened == "Sí" and groups <= 0: missing.append("número de grupos")
+        if faculty_name:
+            if not faculty_contract: missing.append("tipo de contrato del integrante")
+            if not faculty_unit: missing.append("dependencia de la materia")
+            if not faculty_category: missing.append("categoría académica")
+            if not faculty_promotion: missing.append("si está en proceso de promoción")
+
+    elif rubro == "Investigación":
+        role = st.session_state.get(f"research_role_{index}") or ""
+        members = (st.session_state.get(f"research_members_{index}") or "").strip()
+        field = (st.session_state.get(f"research_field_{index}") or "").strip()
+        actors = (st.session_state.get(f"research_actors_{index}") or "").strip()
+        progress = st.session_state.get(f"research_progress_{index}") or ""
+        products = (st.session_state.get(f"research_products_{index}") or "").strip()
+        pct = int(st.session_state.get(f"research_pct_{index}", 0) or 0)
+        on_plan = st.session_state.get(f"research_on_plan_{index}") or ""
+        why = (st.session_state.get(f"research_on_plan_why_{index}") or "").strip()
+        start_date = st.session_state.get(f"research_start_{index}")
+        end_date = st.session_state.get(f"research_end_{index}")
+        detail.update({
+            "participation_level": role, "members": members, "field": field, "linked_actors": actors,
+            "start_date": start_date.isoformat() if hasattr(start_date, "isoformat") else start_date,
+            "end_date": end_date.isoformat() if hasattr(end_date, "isoformat") else end_date,
+            "progress_level": progress, "products": products, "products_progress_pct": pct,
+            "on_plan": on_plan, "on_plan_why": why,
+        })
+        record["description"] = products or f"Proyecto de investigación en {field}."
+        record["participants"] = None
+        if not title: missing.append("proyecto")
+        if not role: missing.append("nivel de participación")
+        if not members: missing.append("integrantes en el proyecto")
+        if not field: missing.append("temática o campo de conocimiento")
+        if not actors: missing.append("actores internos o externos con quienes se vincula")
+        if not progress: missing.append("nivel de avance")
+        if not products: missing.append("productos o actividades de difusión/investigación")
+        if not on_plan: missing.append("si va según lo planeado")
+        if on_plan == "No" and not why: missing.append("explicación de por qué no va según lo planeado")
+
+    if record.get("description") and word_count(record["description"]) > 250:
+        missing.append(f"descripción: {word_count(record['description'])}/250 palabras")
+    if (chart or existing_chart) and not chart_title:
+        missing.append("título de la gráfica")
+    return record, missing
+
+
+def apply_highlights_to_activities(activities, highlights):
+    """Apply Top 1/2/3 rankings from the report-level relevance selection."""
+    for act in activities:
+        act["ranking"] = None
+    for h in highlights or []:
+        idx = h.get("activity_index")
+        rank = h.get("ranking")
+        if isinstance(idx, int) and 0 <= idx < len(activities) and rank in (1, 2, 3):
+            activities[idx]["ranking"] = rank
+    return activities
+
+
+def activity_detail_lines(act):
+    """Human-readable field/value lines for previews and exports."""
+    lines = []
+    if act.get("action_purpose"):
+        lines.append(("Fin de la acción", act.get("action_purpose")))
+    if act.get("action_type"):
+        lines.append(("Tipo de acción", act.get("action_type")))
+    if act.get("inclusion_criteria"):
+        lines.append(("Criterios de inclusión", ", ".join(act.get("inclusion_criteria") or [])))
+    if act.get("activity_date"):
+        lines.append(("Fecha", str(act.get("activity_date"))))
+    if act.get("location"):
+        lines.append(("Lugar", act.get("location")))
+    if act.get("participants"):
+        lines.append(("Participantes", str(act.get("participants"))))
+    if act.get("target_population"):
+        lines.append(("Población", ", ".join(act.get("target_population") or [])))
+    if act.get("target_external_name"):
+        lines.append(("Comunidad / institución externa", act.get("target_external_name")))
+    if act.get("dic_collaboration") is not None:
+        lines.append(("Colaboran otras instancias DIC", "Sí" if act.get("dic_collaboration") else "No"))
+    if act.get("dic_collaboration_units"):
+        lines.append(("Instancias DIC", act.get("dic_collaboration_units")))
+    if act.get("relevance_note"):
+        lines.append(("Por qué importa", act.get("relevance_note")))
+    detail = act.get("detail_data") or {}
+    rubric = act.get("category")
+    if rubric == "Participación en medios de difusión":
+        for label, key in [("Tipo de participación","participation_type"),("Medio o plataforma","platform"),("Tema","topic")]:
+            if detail.get(key): lines.append((label, str(detail.get(key))))
+    elif rubric == "Oferta académica y docencia":
+        mapping = [
+            ("Semestre","semester"),("Créditos","credits"),("Se abrió","opened"),("Número de grupos","groups"),
+            ("Profesores Tiempo Fijo","fixed_professors"),("Profesores Tiempo Variable","variable_professors"),
+            ("Docente","faculty_name"),("Tipo de contrato","faculty_contract"),("Dependencia","faculty_unit"),
+            ("Categoría académica","faculty_category"),("En promoción","faculty_promotion")
+        ]
+        for label, key in mapping:
+            if detail.get(key) not in (None, "", 0): lines.append((label, str(detail.get(key))))
+    elif rubric == "Investigación":
+        mapping = [
+            ("Nivel de participación","participation_level"),("Integrantes","members"),("Campo de conocimiento","field"),
+            ("Actores vinculados","linked_actors"),("Fecha de inicio","start_date"),("Fecha de término","end_date"),
+            ("Nivel de avance","progress_level"),("Productos / difusión","products"),("% avance de productos","products_progress_pct"),
+            ("Va según lo planeado","on_plan"),("Explicación","on_plan_why")
+        ]
+        for label, key in mapping:
+            if detail.get(key) not in (None, "", 0): lines.append((label, str(detail.get(key))))
+    return lines
+
 def validate_current_activities(num_activities):
     activities = []
     messages = []
-    seen_ranks = {}
-
+    month = st.session_state.get("capture_month") or MONTHS[datetime.now().month - 1]
+    role = st.session_state.get("center_user_role") or ""
     for i in range(num_activities):
-        title = (st.session_state.get(f"title_{i}") or "").strip()
-        desc = (st.session_state.get(f"desc_{i}") or "").strip()
-        category_selected = st.session_state.get(f"cat_{i}", CATEGORIES[0])
-        other_category = (st.session_state.get(f"other_cat_{i}") or "").strip()
-        ranking_text = st.session_state.get(f"rank_{i}", "Sin ranking")
-        participants = st.session_state.get(f"part_{i}", 0) or 0
-        photos = st.session_state.get(f"photos_{i}", []) or []
-        social_url = (st.session_state.get(f"social_{i}") or "").strip()
-        chart = st.session_state.get(f"chart_{i}")
-        chart_title = (st.session_state.get(f"chart_title_{i}") or "").strip()
-        existing_photos = st.session_state.get(f"existing_photos_{i}", []) or []
-        existing_chart = st.session_state.get(f"existing_chart_{i}")
-
-        started = bool(
-            title or desc or participants > 0 or ranking_text != "Sin ranking"
-            or category_selected != CATEGORIES[0] or photos or social_url or chart
-            or chart_title or existing_photos or existing_chart
-        )
-        if not started:
+        record, missing = activity_from_session(i, actor_role=role, month=month)
+        if record is None:
             continue
-
-        missing = []
-        if not title:
-            missing.append("Nombre del hito / actividad")
-        if not desc:
-            missing.append("Descripción del hito")
-        elif word_count(desc) > 250:
-            missing.append(f"Descripción: {word_count(desc)}/250 palabras")
-        if participants <= 0:
-            missing.append("Participantes / alcance")
-        if category_selected == "Otro" and not other_category:
-            missing.append("Especificar categoría")
-        if social_url and not social_url_is_valid(normalize_social_url(social_url)):
-            missing.append("URL de redes sociales no válido")
-        effective_chart = chart or existing_chart
-        if effective_chart and not chart_title:
-            missing.append("Título de la gráfica")
-        if chart_title and not effective_chart:
-            missing.append("Archivo de la gráfica")
-
-        ranking = None if ranking_text == "Sin ranking" else int(ranking_text[-1])
-        if ranking:
-            if ranking in seen_ranks:
-                missing.append(
-                    f"Ranking Top {ranking} repetido; ya está en Actividad {seen_ranks[ranking]}"
-                )
-            else:
-                seen_ranks[ranking] = i + 1
-
+        activities.append(record)
         if missing:
-            messages.append(f"Actividad {i+1}: " + " · ".join(missing))
-
-        category = other_category if category_selected == "Otro" and other_category else category_selected
-        activities.append({
-            "title": title,
-            "description": desc,
-            "category": category,
-            "ranking": ranking,
-            "participants": participants or None,
-            "photos": photos,
-            "social_url": normalize_social_url(social_url),
-            "chart": chart,
-            "chart_title": chart_title,
-            "existing_photos": existing_photos,
-            "existing_chart": existing_chart,
-        })
-
+            messages.append(f"Acción {i+1}: " + " · ".join(missing))
     return activities, messages
-
 
 def show_validation_messages(messages):
     if messages:
@@ -1415,16 +1697,12 @@ def render_social_preview(url, key_suffix=""):
 
 
 def activity_fields_complete(index):
-    title = (st.session_state.get(f"title_{index}") or "").strip()
-    desc = (st.session_state.get(f"desc_{index}") or "").strip()
-    category_selected = st.session_state.get(f"cat_{index}", CATEGORIES[0])
-    other_category = (st.session_state.get(f"other_cat_{index}") or "").strip()
-    participants = st.session_state.get(f"part_{index}", 0) or 0
-    if not title or not desc or word_count(desc) > 250 or participants <= 0:
-        return False
-    if category_selected == "Otro" and not other_category:
-        return False
-    return True
+    record, missing = activity_from_session(
+        index,
+        actor_role=st.session_state.get("center_user_role"),
+        month=st.session_state.get("capture_month"),
+    )
+    return record is not None and not missing
 
 
 
@@ -1758,8 +2036,11 @@ def hydrate_imported_docx(parsed):
     # Clear any prior capture data.
     for key in list(st.session_state.keys()):
         if re.match(
-            r"^(title|desc|cat|other_cat|rank|part|photos|social|chart|chart_title|"
-            r"existing_photos|existing_chart)_\d+$",
+            r"^(title|desc|cat|other_cat|rank|part|rubro|purpose|action_type|criteria|criteria_other|activity_date|"
+            r"location|population|external_population|dic_collab|dic_units|relevance_note|media_type|media_platform|media_topic|media_link|"
+            r"academic_semester|academic_credits|academic_opened|academic_groups|academic_fixed_prof|academic_variable_prof|faculty_name|faculty_contract|faculty_unit|faculty_category|faculty_promotion|"
+            r"research_role|research_members|research_field|research_actors|research_start|research_end|research_progress|research_products|research_pct|research_on_plan|research_on_plan_why|"
+            r"photos|social|chart|chart_title|existing_photos|existing_chart)_\d+$",
             key,
         ):
             st.session_state.pop(key, None)
@@ -1819,25 +2100,66 @@ def resume_draft(report):
 
     for i, act in enumerate(acts):
         category = act.get("category") or CATEGORIES[0]
-        if category in CATEGORIES:
-            st.session_state[f"cat_{i}"] = category
-            st.session_state[f"other_cat_{i}"] = ""
-        else:
-            st.session_state[f"cat_{i}"] = "Otro"
-            st.session_state[f"other_cat_{i}"] = category
-
+        st.session_state[f"rubro_{i}"] = category if category in REPORT_RUBRICS else CATEGORIES[0]
+        st.session_state[f"cat_{i}"] = st.session_state[f"rubro_{i}"]
         st.session_state[f"title_{i}"] = act.get("title") or ""
         st.session_state[f"desc_{i}"] = act.get("description_original") or ""
         st.session_state[f"rank_{i}"] = rank_label(act.get("ranking"))
         st.session_state[f"part_{i}"] = int(act.get("participants") or 0)
+        st.session_state[f"activity_date_{i}"] = act.get("activity_date") or datetime.now().date()
+        st.session_state[f"purpose_{i}"] = act.get("action_purpose") or ""
+        st.session_state[f"action_type_{i}"] = act.get("action_type") or ""
+        st.session_state[f"criteria_{i}"] = act.get("inclusion_criteria") or []
+        st.session_state[f"location_{i}"] = act.get("location") or ""
+        st.session_state[f"population_{i}"] = act.get("target_population") or []
+        st.session_state[f"external_population_{i}"] = act.get("target_external_name") or ""
+        st.session_state[f"dic_collab_{i}"] = "Sí" if act.get("dic_collaboration") else "No"
+        st.session_state[f"dic_units_{i}"] = act.get("dic_collaboration_units") or ""
+        st.session_state[f"relevance_note_{i}"] = act.get("relevance_note") or ""
         st.session_state[f"social_{i}"] = act.get("social_url") or ""
         st.session_state[f"chart_title_{i}"] = act.get("chart_title") or ""
+        detail = act.get("detail_data") or {}
+        st.session_state[f"media_type_{i}"] = detail.get("participation_type") or MEDIA_TYPES[0]
+        st.session_state[f"media_platform_{i}"] = detail.get("platform") or ""
+        st.session_state[f"media_topic_{i}"] = detail.get("topic") or (act.get("title") or "")
+        st.session_state[f"media_link_{i}"] = detail.get("link") or act.get("social_url") or ""
+        st.session_state[f"academic_semester_{i}"] = detail.get("semester") or ACADEMIC_SEMESTERS[0]
+        st.session_state[f"academic_credits_{i}"] = int(detail.get("credits") or 0)
+        st.session_state[f"academic_opened_{i}"] = detail.get("opened") or "Sí"
+        st.session_state[f"academic_groups_{i}"] = int(detail.get("groups") or 0)
+        st.session_state[f"academic_fixed_prof_{i}"] = int(detail.get("fixed_professors") or 0)
+        st.session_state[f"academic_variable_prof_{i}"] = int(detail.get("variable_professors") or 0)
+        st.session_state[f"faculty_name_{i}"] = detail.get("faculty_name") or ""
+        st.session_state[f"faculty_contract_{i}"] = detail.get("faculty_contract") or "Tiempo Fijo"
+        st.session_state[f"faculty_unit_{i}"] = detail.get("faculty_unit") or ""
+        st.session_state[f"faculty_category_{i}"] = detail.get("faculty_category") or "Adjunto"
+        st.session_state[f"faculty_promotion_{i}"] = detail.get("faculty_promotion") or "No"
+        st.session_state[f"research_role_{i}"] = detail.get("participation_level") or RESEARCH_PARTICIPATION[0]
+        st.session_state[f"research_members_{i}"] = detail.get("members") or ""
+        st.session_state[f"research_field_{i}"] = detail.get("field") or ""
+        st.session_state[f"research_actors_{i}"] = detail.get("linked_actors") or ""
+        st.session_state[f"research_progress_{i}"] = detail.get("progress_level") or RESEARCH_PROGRESS[0]
+        st.session_state[f"research_products_{i}"] = detail.get("products") or ""
+        st.session_state[f"research_pct_{i}"] = int(detail.get("products_progress_pct") or 0)
+        st.session_state[f"research_on_plan_{i}"] = detail.get("on_plan") or "Sí"
+        st.session_state[f"research_on_plan_why_{i}"] = detail.get("on_plan_why") or ""
 
         saved_photos = get_activity_photos(act["id"])
         st.session_state[f"existing_photos_{i}"] = saved_photos
-
         saved_chart = get_activity_chart(act)
         st.session_state[f"existing_chart_{i}"] = saved_chart
+
+    highlights = report.get("monthly_highlights") or []
+    st.session_state["highlight_selection"] = [h.get("label") for h in highlights if h.get("label")]
+    for idx, h in enumerate(highlights):
+        st.session_state[f"highlight_reason_{idx}"] = h.get("why") or ""
+    st.session_state["learning_planning_advances"] = report.get("learning_planning_advances") or ""
+    st.session_state["learning_risks"] = report.get("learning_risks") or ""
+    st.session_state["learning_opportunity"] = report.get("learning_opportunity") or ""
+    media_summary = report.get("media_monthly_summary") or {}
+    st.session_state["media_appearances"] = int(media_summary.get("appearances") or 0)
+    st.session_state["media_total_participations"] = int(media_summary.get("total_participations") or 0)
+    st.session_state["media_reach"] = int(media_summary.get("reach") or 0)
 
     st.session_state.director_page = "Nuevo reporte"
     st.session_state.capture_method = "Carga manual"
@@ -2839,71 +3161,92 @@ def generate_segment_pdf(rep, act, photos):
 
 
 
-def generate_center_word(unit, month, year, activities):
+def generate_center_word(unit, month, year, activities, report_extras=None):
+    report_extras = report_extras or {}
     doc = Document()
     sec = doc.sections[0]
-    sec.top_margin = Inches(0.55)
-    sec.bottom_margin = Inches(0.55)
-    sec.left_margin = Inches(0.65)
-    sec.right_margin = Inches(0.65)
+    sec.top_margin = Inches(0.55); sec.bottom_margin = Inches(0.55)
+    sec.left_margin = Inches(0.65); sec.right_margin = Inches(0.65)
     add_docx_page_x_of_y(sec)
     logo = Path("assets/iteso_logo.png")
     if logo.exists():
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         p.add_run().add_picture(str(logo), width=Inches(2.2))
     p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r = p.add_run("Informe de actividades"); r.bold = True; r.font.size = Pt(18); r.font.color.rgb = RGBColor(0,76,127)
+    r = p.add_run("Informe mensual de centro a la DIC"); r.bold = True; r.font.size = Pt(18); r.font.color.rgb = RGBColor(0,76,127)
     p2 = doc.add_paragraph(); p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p2.add_run(f"Dirección de Integración Comunitaria\n{month} {year}")
     doc.add_paragraph(f"{unit} — {UNITS[unit]}").runs[0].bold = True
+    doc.add_heading("Memoria del mes", level=1)
     for i, act in enumerate(activities, start=1):
         h = doc.add_paragraph(); rr = h.add_run(f"{i}. {act['title']}"); rr.bold = True; rr.font.color.rgb = RGBColor(0,76,127)
-        meta = [f"Categoría: {act.get('category','')}", rank_label(act.get('ranking'))]
-        if act.get('participants'): meta.append(f"Participantes / alcance: {act['participants']}")
-        doc.add_paragraph(" · ".join(meta))
-        doc.add_paragraph(act.get("description") or "")
+        meta = [act.get('category',''), rank_label(act.get('ranking'))]
+        doc.add_paragraph(" · ".join([x for x in meta if x]))
+        for label, value in activity_detail_lines(act):
+            pdet = doc.add_paragraph(); rb = pdet.add_run(f"{label}: "); rb.bold = True; pdet.add_run(str(value))
+        if act.get("description"):
+            doc.add_paragraph(act.get("description") or "")
         if act.get("social_url"):
-            doc.add_paragraph(f"Redes sociales: {act['social_url']}")
+            doc.add_paragraph(f"Enlace: {act['social_url']}")
         chart = current_uploaded_chart(act)
         if chart:
-            pchart = doc.add_paragraph()
-            rchart = pchart.add_run(chart.get("title") or "Gráfica")
-            rchart.bold = True
-            try:
-                doc.add_picture(io.BytesIO(chart["bytes"]), width=Inches(5.7))
-            except Exception:
-                pass
+            pchart = doc.add_paragraph(); rchart = pchart.add_run(chart.get("title") or "Gráfica"); rchart.bold = True
+            try: doc.add_picture(io.BytesIO(chart["bytes"]), width=Inches(5.7))
+            except Exception: pass
         for ph in current_uploaded_photos(act):
             try: doc.add_picture(io.BytesIO(ph["bytes"]), width=Inches(5.7))
             except Exception: pass
+
+    highlights = report_extras.get("monthly_highlights") or []
+    if highlights:
+        doc.add_heading("Lo más relevante del mes", level=1)
+        for h in highlights:
+            p = doc.add_paragraph(); rb = p.add_run(f"Top {h.get('ranking')} · {h.get('title','')}"); rb.bold = True
+            doc.add_paragraph(h.get("why") or "")
+
+    media = report_extras.get("media_monthly_summary") or {}
+    if media:
+        doc.add_heading("Datos concentrados de medios del mes", level=1)
+        doc.add_paragraph(f"Apariciones en medios: {media.get('appearances',0)}")
+        doc.add_paragraph(f"Total de participaciones: {media.get('total_participations',0)}")
+        doc.add_paragraph(f"Alcance o audiencia: {media.get('reach',0)}")
+
+    doc.add_heading("Aprendizajes", level=1)
+    for label, key in [
+        ("Avances sustantivos en los objetivos de planeación", "learning_planning_advances"),
+        ("Acciones paradas, en riesgo o que requieren decisiones", "learning_risks"),
+        ("Un aprendizaje u oportunidad derivado del trabajo mensual", "learning_opportunity"),
+    ]:
+        p = doc.add_paragraph(); rb = p.add_run(label); rb.bold = True
+        doc.add_paragraph(report_extras.get(key) or "")
     bio = io.BytesIO(); doc.save(bio); return bio.getvalue()
 
 
-def generate_center_pdf(unit, month, year, activities):
+def generate_center_pdf(unit, month, year, activities, report_extras=None):
+    report_extras = report_extras or {}
     bio = io.BytesIO()
     doc = SimpleDocTemplate(bio, pagesize=letter, rightMargin=45, leftMargin=45, topMargin=45, bottomMargin=45)
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("centerTitle", parent=styles["Title"], textColor=HexColor(ITESO_BLUE), fontSize=18, leading=22, alignment=TA_CENTER, spaceAfter=8)
-    h_style = ParagraphStyle("centerH", parent=styles["Heading2"], textColor=HexColor(ITESO_BLUE), fontSize=13, leading=16, spaceBefore=10, spaceAfter=6)
+    title_style = ParagraphStyle("centerTitleNew", parent=styles["Title"], textColor=HexColor(ITESO_BLUE), fontSize=18, leading=22, alignment=TA_CENTER, spaceAfter=8)
+    h_style = ParagraphStyle("centerHNew", parent=styles["Heading2"], textColor=HexColor(ITESO_BLUE), fontSize=13, leading=16, spaceBefore=10, spaceAfter=6)
     body = styles["BodyText"]; body.fontSize = 9.5; body.leading = 13
     story = []
     logo = Path("assets/iteso_logo.png")
     if logo.exists():
         img = Image(str(logo), width=190, height=45); img.hAlign = "RIGHT"; story += [img, Spacer(1,8)]
-    story += [Paragraph("Informe de actividades", title_style), Paragraph(f"Dirección de Integración Comunitaria<br/>{month} {year}", styles["Heading3"]), Spacer(1,10), Paragraph(f"{unit} — {UNITS[unit]}", h_style)]
+    story += [Paragraph("Informe mensual de centro a la DIC", title_style), Paragraph(f"Dirección de Integración Comunitaria<br/>{month} {year}", styles["Heading3"]), Spacer(1,10), Paragraph(f"{unit} — {UNITS[unit]}", h_style), Paragraph("Memoria del mes", h_style)]
     for i, act in enumerate(activities, start=1):
-        story.append(Paragraph(f"{i}. {act['title']}", h_style))
-        meta = [f"Categoría: {act.get('category','')}", rank_label(act.get('ranking'))]
-        if act.get('participants'): meta.append(f"Participantes / alcance: {act['participants']}")
-        story.append(Paragraph(" · ".join(meta), body)); story.append(Paragraph(act.get("description") or "", body))
+        story.append(Paragraph(f"{i}. {html.escape(act['title'])}", h_style))
+        story.append(Paragraph(html.escape(act.get('category','')) + " · " + rank_label(act.get('ranking')), body))
+        for label, value in activity_detail_lines(act):
+            story.append(Paragraph(f"<b>{html.escape(str(label))}:</b> {html.escape(str(value))}", body))
+        if act.get("description"):
+            story.append(Paragraph(html.escape(act.get("description") or ""), body))
         if act.get("social_url"):
-            story.append(Paragraph(f"<b>Redes sociales:</b> {html.escape(act['social_url'])}", body))
+            story.append(Paragraph(f"<b>Enlace:</b> {html.escape(act['social_url'])}", body))
         chart = current_uploaded_chart(act)
         if chart:
-            add_reportlab_image(
-                story, chart["bytes"], max_w=430, max_h=300,
-                title=chart.get("title") or "Gráfica", title_style=body
-            )
+            add_reportlab_image(story, chart["bytes"], max_w=430, max_h=300, title=chart.get("title") or "Gráfica", title_style=body)
         for ph in current_uploaded_photos(act):
             try:
                 img = Image(io.BytesIO(ph["bytes"])); max_w,max_h = 430,280
@@ -2912,11 +3255,29 @@ def generate_center_pdf(unit, month, year, activities):
                 story += [Spacer(1,8), img]
             except Exception: pass
         story.append(Spacer(1,8))
+    highlights = report_extras.get("monthly_highlights") or []
+    if highlights:
+        story.append(Paragraph("Lo más relevante del mes", h_style))
+        for h in highlights:
+            story.append(Paragraph(f"<b>Top {h.get('ranking')} · {html.escape(h.get('title',''))}</b>", body))
+            story.append(Paragraph(html.escape(h.get("why") or ""), body))
+    media = report_extras.get("media_monthly_summary") or {}
+    if media:
+        story.append(Paragraph("Datos concentrados de medios del mes", h_style))
+        story.append(Paragraph(f"Apariciones en medios: {media.get('appearances',0)} · Total de participaciones: {media.get('total_participations',0)} · Alcance/audiencia: {media.get('reach',0)}", body))
+    story.append(Paragraph("Aprendizajes", h_style))
+    for label, key in [
+        ("Avances sustantivos en los objetivos de planeación", "learning_planning_advances"),
+        ("Acciones paradas, en riesgo o que requieren decisiones", "learning_risks"),
+        ("Un aprendizaje u oportunidad derivado del trabajo mensual", "learning_opportunity"),
+    ]:
+        story.append(Paragraph(f"<b>{label}</b>", body))
+        story.append(Paragraph(html.escape(report_extras.get(key) or ""), body))
     doc.build(story, canvasmaker=NumberedCanvas); return bio.getvalue()
 
 
 @st.dialog("Confirmar envío", dismissible=False)
-def confirm_submission_dialog(unit, month, year, sender_email, activities, actor_role=None):
+def confirm_submission_dialog(unit, month, year, sender_email, activities, actor_role=None, report_extras=None):
     actor_role = (actor_role or st.session_state.get("center_user_role") or "").upper()
     if actor_role != "DIRECTOR":
         st.error("Sólo el Director del centro puede enviar el informe mensual.")
@@ -2945,7 +3306,7 @@ def confirm_submission_dialog(unit, month, year, sender_email, activities, actor
         ):
             # First persist as BORRADOR. Only mark ENVIADO after all photos/charts
             # have been written and read back successfully.
-            rid = save_report(unit, month, year, "BORRADOR", sender_email)
+            rid = save_report(unit, month, year, "BORRADOR", sender_email, report_extras=report_extras)
             persistence_errors = replace_activities(rid, activities, actor_role=actor_role)
 
             if persistence_errors:
@@ -2961,7 +3322,7 @@ def confirm_submission_dialog(unit, month, year, sender_email, activities, actor
                 )
                 return
 
-            save_report(unit, month, year, "ENVIADO", sender_email)
+            save_report(unit, month, year, "ENVIADO", sender_email, report_extras=report_extras)
             send_confirmation_email(sender_email, unit, month, year)
 
             # Date/time shown in Guadalajara local time.
@@ -3054,6 +3415,11 @@ def generate_saved_center_word(rep, activities):
         if act.get("participants"):
             meta.append(f"Participantes / alcance: {act['participants']}")
         doc.add_paragraph(" · ".join(meta))
+        for label, value in activity_detail_lines(act):
+            pdet = doc.add_paragraph()
+            rb = pdet.add_run(f"{label}: ")
+            rb.bold = True
+            pdet.add_run(str(value))
 
         doc.add_paragraph(
             act.get("description_original")
@@ -3080,6 +3446,22 @@ def generate_saved_center_word(rep, activities):
             except Exception:
                 pass
 
+    highlights = rep.get("monthly_highlights") or []
+    if highlights:
+        doc.add_heading("Lo más relevante del mes", level=1)
+        for h in highlights:
+            p = doc.add_paragraph()
+            rb = p.add_run(f"Top {h.get('ranking')} · {h.get('title','')}")
+            rb.bold = True
+            doc.add_paragraph(h.get("why") or "")
+    doc.add_heading("Aprendizajes", level=1)
+    for label, key in [
+        ("Avances sustantivos en los objetivos de planeación", "learning_planning_advances"),
+        ("Acciones paradas, en riesgo o que requieren decisiones", "learning_risks"),
+        ("Un aprendizaje u oportunidad derivado del trabajo mensual", "learning_opportunity"),
+    ]:
+        p = doc.add_paragraph(); rb = p.add_run(label); rb.bold = True
+        doc.add_paragraph(rep.get(key) or "")
     bio = io.BytesIO()
     doc.save(bio)
     bio.seek(0)
@@ -3182,6 +3564,20 @@ def generate_saved_center_pdf(rep, activities):
 
         story.append(Spacer(1, 8))
 
+    highlights = rep.get("monthly_highlights") or []
+    if highlights:
+        story.append(Paragraph("Lo más relevante del mes", h_style))
+        for h in highlights:
+            story.append(Paragraph(f"<b>Top {h.get('ranking')} · {html.escape(h.get('title',''))}</b>", body))
+            story.append(Paragraph(html.escape(h.get("why") or ""), body))
+    story.append(Paragraph("Aprendizajes", h_style))
+    for label, key in [
+        ("Avances sustantivos en los objetivos de planeación", "learning_planning_advances"),
+        ("Acciones paradas, en riesgo o que requieren decisiones", "learning_risks"),
+        ("Un aprendizaje u oportunidad derivado del trabajo mensual", "learning_opportunity"),
+    ]:
+        story.append(Paragraph(f"<b>{label}</b>", body))
+        story.append(Paragraph(html.escape(rep.get(key) or ""), body))
     doc.build(story, canvasmaker=NumberedCanvas)
     bio.seek(0)
     return bio.getvalue()
@@ -4051,255 +4447,208 @@ if profile == "Centro / Dirección":
         else:
             st.info("Perfil Colaborador · puedes capturar, editar y guardar borradores. El ranking y el envío corresponden al Director.")
 
-        st.subheader("¿Cómo quieres cargar el reporte?")
-        capture_method = st.radio(
-            "Método de captura",
-            ["Carga manual", "Carga desde archivo .docx"],
-            horizontal=True,
-            key="capture_method",
-            label_visibility="collapsed",
+        st.info(
+            "La captura se organiza ahora por los siete rubros del Informe Mensual DIC. "
+            "Para cada acción elige primero el rubro; el formulario se adapta automáticamente."
         )
-
-        imported_ready = bool(st.session_state.get("docx_import_success"))
-
-        if capture_method == "Carga desde archivo .docx" and not imported_ready:
-            st.markdown(
-                """
-                Utiliza la **plantilla oficial DIC**. Descárgala, llénala en Microsoft Word
-                sin modificar los nombres de los campos y vuelve a cargarla aquí.
-                """
-            )
-
-            st.download_button(
-                "⬇️ Descargar plantilla oficial Word",
-                data=official_docx_template_bytes(),
-                file_name="Plantilla_Informe_Mensual_DIC_ITESO.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
-                on_click="ignore",
-            )
-
-            uploaded_docx = st.file_uploader(
-                "Cargar reporte lleno (.docx)",
-                type=["docx"],
-                key="director_docx_upload",
-                help="Carga únicamente la plantilla oficial DIC completada en formato .docx.",
-            )
-
-            if uploaded_docx is not None:
-                st.caption(f"Archivo seleccionado: {uploaded_docx.name}")
-                if st.button(
-                    "📥 Importar información del Word",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    parsed, structure_errors, import_warnings = parse_dic_docx(
-                        uploaded_docx.getvalue(), unit
-                    )
-                    if structure_errors:
-                        st.error(
-                            "No se puede importar porque el formato original fue modificado."
-                        )
-                        for msg in structure_errors:
-                            st.markdown(f"- {msg}")
-                        st.info(
-                            "Descarga nuevamente la plantilla oficial y respeta los nombres "
-                            "y el orden de los campos."
-                        )
-                    elif parsed is not None:
-                        st.session_state.docx_import_filename = uploaded_docx.name
-                        st.session_state.docx_import_warnings = import_warnings
-                        hydrate_imported_docx(parsed)
-                        st.rerun()
-
-            st.stop()
-
-        if imported_ready:
-            st.success(st.session_state.docx_import_success)
-            if st.session_state.get("docx_import_warnings"):
-                with st.expander("⚠️ Observaciones detectadas al importar", expanded=True):
-                    for warning in st.session_state.docx_import_warnings:
-                        st.markdown(f"- {warning}")
-            st.caption(
-                "La información importada aparece abajo en el mismo formulario de la captura manual. "
-                "Revísala y corrige lo necesario antes de previsualizar o enviar."
-            )
-
-            c_change, _ = st.columns([1.2, 3])
-            with c_change:
-                if st.button("↩️ Cargar otro Word", use_container_width=True):
-                    st.session_state.docx_import_success = ""
-                    st.session_state.docx_import_warnings = []
-                    st.session_state.docx_import_filename = ""
-                    st.session_state.pop("director_docx_upload", None)
-                    st.session_state.capture_method = "Carga desde archivo .docx"
-                    st.rerun()
 
         col1, col2, col3 = st.columns([2, 1, 1])
         with col1:
             st.info(f"**{unit}** · {UNITS[unit]}")
         with col2:
-            month = st.selectbox(
-                "Mes",
-                MONTHS,
-                key="capture_month",
-            )
+            month = st.selectbox("Mes", MONTHS, key="capture_month")
         with col3:
-            year = st.selectbox(
-                "Año",
-                list(range(2025, 2031)),
-                key="capture_year",
-            )
+            year = st.selectbox("Año", list(range(2025, 2031)), key="capture_year")
 
         if st.session_state.get("resuming_report_id"):
             st.success(
                 f"Continuando borrador de **{month} {year}**. "
-                "Puedes editar las actividades existentes o agregar nuevas."
+                "Puedes editar las acciones existentes o agregar nuevas."
             )
 
+        periodic_notes = []
+        if month in ACADEMIC_REPORTING_MONTHS:
+            periodic_notes.append("Oferta académica y docencia está habilitada para este corte académico.")
+        if month in RESEARCH_REPORTING_MONTHS:
+            periodic_notes.append("Investigación está habilitada para este mes (enero/agosto).")
+        if periodic_notes:
+            st.caption(" · ".join(periodic_notes))
         st.caption(
-            "Registra inicialmente hasta 5 hitos. Si necesitas más, utiliza **Agregar actividad**. "
-            "Cada descripción admite un máximo de 250 palabras. Toda actividad iniciada debe tener completos "
-            "sus campos obligatorios antes de continuar; la fotografía es opcional. Sólo puede existir un Top 1, Top 2 y Top 3. "
-            "Si importaste un Word, puedes revisar y editar aquí todos los datos antes de enviarlos."
+            "Registra sólo las acciones relevantes del mes. Los rubros 1–5 están disponibles cada mes. "
+            "Oferta académica y docencia se solicita tres veces al año; Investigación, dos veces al año. "
+            "Al terminar, el Director seleccionará de 1 a 3 acciones como **Lo más relevante del mes** y completará **Aprendizajes**."
         )
-
-        activities = []
-        errors = []
 
         for i in range(st.session_state.num_activities):
             previous_complete = True if i == 0 else activity_fields_complete(i - 1)
-            with st.expander(f"Actividad {i+1}", expanded=(i < 2 and previous_complete)):
+            with st.expander(f"Acción {i+1}", expanded=(i < 2 and previous_complete)):
                 if not previous_complete:
-                    st.info(f"🔒 Completa todos los campos obligatorios de la Actividad {i} antes de capturar la Actividad {i+1}.")
+                    st.info(f"🔒 Completa los campos obligatorios de la Acción {i} antes de capturar la Acción {i+1}.")
                     continue
-                title = st.text_input("Nombre del hito / actividad", key=f"title_{i}")
-                c1,c2,c3 = st.columns([2,1,1])
-                with c1:
-                    category_selected = st.selectbox("Tema / categoría", CATEGORIES, key=f"cat_{i}")
-                    other_category = ""
-                    if category_selected == "Otro":
-                        other_category = st.text_input("Especifica la categoría", key=f"other_cat_{i}", placeholder="Escribe la categoría")
-                    category = other_category.strip() if category_selected == "Otro" and other_category.strip() else category_selected
-                with c2:
-                    if user_role == "DIRECTOR":
-                        ranking_text = st.selectbox(
-                            "Importancia",
-                            ["Sin ranking","Top 1","Top 2","Top 3"],
-                            key=f"rank_{i}",
-                            on_change=handle_rank_change,
-                            args=(i,),
-                        )
-                    else:
-                        ranking_text = st.session_state.get(f"rank_{i}", "Sin ranking")
+
+                current_rubric = st.session_state.get(f"rubro_{i}") or CATEGORIES[0]
+                rubric_options = available_rubrics_for_month(month, include_current=current_rubric)
+                if current_rubric not in rubric_options:
+                    st.session_state[f"rubro_{i}"] = rubric_options[0]
+                rubro = st.selectbox(
+                    "Rubro de la acción",
+                    rubric_options,
+                    key=f"rubro_{i}",
+                    help="Selecciona el apartado del Informe Mensual DIC al que corresponde esta acción.",
+                )
+                st.caption(REPORT_RUBRICS.get(rubro, ""))
+
+                if rubro in {
+                    "Vida universitaria", "Vinculación externa", "Desarrollo institucional",
+                    "Capacitación y formación del personal"
+                }:
+                    st.text_input("Título de la acción", key=f"title_{i}")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.selectbox("Fin de la acción", [""] + ACTION_PURPOSES, key=f"purpose_{i}")
+                    with c2:
+                        st.selectbox("Tipo de acción", [""] + ACTION_TYPES, key=f"action_type_{i}")
+                    criteria = st.multiselect(
+                        "Criterio(s) de inclusión que cumple",
+                        INCLUSION_CRITERIA,
+                        key=f"criteria_{i}",
+                    )
+                    if "Otro" in criteria:
+                        st.text_input("Especifica el otro criterio", key=f"criteria_other_{i}")
+                    c3, c4, c5 = st.columns([1, 2, 1])
+                    with c3:
+                        st.date_input("Fecha", key=f"activity_date_{i}")
+                    with c4:
+                        st.text_input("Lugar", key=f"location_{i}")
+                    with c5:
+                        st.number_input("Número de participantes", min_value=0, step=1, key=f"part_{i}")
+                    population = st.multiselect(
+                        "Población a la que está dirigida",
+                        TARGET_POPULATIONS,
+                        key=f"population_{i}",
+                    )
+                    if "Comunidad externa" in population:
                         st.text_input(
-                            "Importancia",
-                            value=ranking_text,
-                            disabled=True,
-                            key=f"rank_readonly_{i}",
-                            help="Sólo el Director puede asignar o modificar el ranking.",
+                            "Nombre de la comunidad / institución externa",
+                            key=f"external_population_{i}",
                         )
-                with c3:
-                    participants = st.number_input("Participantes / alcance", min_value=0, step=1, value=0, key=f"part_{i}", help="Campo obligatorio para una actividad capturada.")
-                desc = st.text_area("Descripción del hito", height=150, placeholder="Qué ocurrió, por qué fue relevante, resultados y actores participantes.", key=f"desc_{i}")
-                wc = word_count(desc)
-                if wc > 250: st.error(f"{wc}/250 palabras. Reduce la descripción en {wc-250} palabras.")
-                else: st.caption(f"{wc}/250 palabras")
-                photos = st.file_uploader("Fotografías (opcional)", type=["jpg","jpeg","png"], accept_multiple_files=True, key=f"photos_{i}", help="Puedes cargar una o más fotografías. Este campo es opcional.")
+                    collab = st.radio(
+                        "¿Colaboran otras instancias de la DIC?",
+                        ["No", "Sí"], horizontal=True, key=f"dic_collab_{i}",
+                    )
+                    if collab == "Sí":
+                        st.text_input("¿Cuáles instancias de la DIC?", key=f"dic_units_{i}")
+                    desc = st.text_area(
+                        "Descripción breve",
+                        height=130,
+                        key=f"desc_{i}",
+                        placeholder="Qué ocurrió, principales resultados y actores participantes.",
+                    )
+                    wc = word_count(desc)
+                    st.caption(f"{wc}/250 palabras")
+                    if wc > 250:
+                        st.error(f"Reduce la descripción en {wc-250} palabras.")
+                    st.text_input(
+                        "Por qué importa / qué conviene que la Dirección sepa (1 línea)",
+                        key=f"relevance_note_{i}",
+                    )
+                    st.text_input(
+                        "Enlace relacionado (opcional)",
+                        key=f"social_{i}",
+                        placeholder="https://...",
+                    )
+
+                elif rubro == "Participación en medios de difusión":
+                    st.info("Registra una ficha por participación en medios o redes sociales.")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.selectbox("Tipo de participación", [""] + MEDIA_TYPES, key=f"media_type_{i}")
+                    with c2:
+                        st.text_input("Medio o plataforma", key=f"media_platform_{i}")
+                    st.date_input("Fecha", key=f"activity_date_{i}")
+                    st.text_input("Tema de la participación", key=f"media_topic_{i}")
+                    st.text_input("Enlace (en caso de que haya)", key=f"media_link_{i}", placeholder="https://...")
+
+                elif rubro == "Oferta académica y docencia":
+                    st.info(
+                        "Este rubro se solicita sólo en los tres cortes académicos del año. "
+                        "Registra una ficha por curso ofertado."
+                    )
+                    st.selectbox("Semestre", [""] + ACADEMIC_SEMESTERS, key=f"academic_semester_{i}")
+                    st.text_input("Nombre del curso ofertado", key=f"title_{i}")
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        st.number_input("Créditos", min_value=0, step=1, key=f"academic_credits_{i}")
+                    with c2:
+                        st.selectbox("¿Se abrió?", ["", "Sí", "No"], key=f"academic_opened_{i}")
+                    with c3:
+                        st.number_input("Número de grupos", min_value=0, step=1, key=f"academic_groups_{i}")
+                    c4, c5 = st.columns(2)
+                    with c4:
+                        st.number_input("# Profesores de Tiempo Fijo", min_value=0, step=1, key=f"academic_fixed_prof_{i}")
+                    with c5:
+                        st.number_input("# Profesores de Tiempo Variable", min_value=0, step=1, key=f"academic_variable_prof_{i}")
+                    with st.expander("Integrante DIC con materias / proceso de promoción (opcional)"):
+                        st.text_input("Nombre del docente", key=f"faculty_name_{i}")
+                        c6, c7 = st.columns(2)
+                        with c6:
+                            st.selectbox("Tipo de contrato", ["Tiempo Fijo", "Tiempo Variable"], key=f"faculty_contract_{i}")
+                            st.text_input("Dependencia a la que está adscrita la materia", key=f"faculty_unit_{i}")
+                        with c7:
+                            st.selectbox("Categoría", ["Adjunto", "Asociado", "Titular"], key=f"faculty_category_{i}")
+                            st.selectbox("¿Está en proceso de promoción?", ["No", "Sí"], key=f"faculty_promotion_{i}")
+
+                elif rubro == "Investigación":
+                    st.info("Investigación se solicita dos veces al año: enero y agosto, en articulación con la DIP.")
+                    st.text_input("Proyecto", key=f"title_{i}")
+                    st.selectbox("Nivel de participación", [""] + RESEARCH_PARTICIPATION, key=f"research_role_{i}")
+                    st.text_area("Integrantes en el proyecto", key=f"research_members_{i}", height=80)
+                    st.text_input("Temática o campo de conocimiento", key=f"research_field_{i}")
+                    st.text_area("Actores internos o externos con quienes se vincula", key=f"research_actors_{i}", height=80)
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.date_input("Fecha de inicio", key=f"research_start_{i}")
+                    with c2:
+                        st.date_input("Fecha de término", key=f"research_end_{i}")
+                    st.selectbox("Nivel de avance", [""] + RESEARCH_PROGRESS, key=f"research_progress_{i}")
+                    st.text_area("Productos o actividades de difusión / investigación", key=f"research_products_{i}", height=110)
+                    st.number_input("% de avance de productos", min_value=0, max_value=100, step=5, key=f"research_pct_{i}")
+                    on_plan = st.selectbox("¿Va según lo planeado?", ["", "Sí", "No"], key=f"research_on_plan_{i}")
+                    if on_plan == "No":
+                        st.text_area("¿Por qué no va según lo planeado?", key=f"research_on_plan_why_{i}", height=80)
+
+                st.markdown("##### Evidencias opcionales")
+                photos = st.file_uploader(
+                    "Fotografías (opcional)", type=["jpg", "jpeg", "png"],
+                    accept_multiple_files=True, key=f"photos_{i}"
+                )
                 existing_photos = st.session_state.get(f"existing_photos_{i}", []) or []
                 if existing_photos:
-                    st.caption("Fotografías guardadas en el borrador")
                     ep_cols = st.columns(min(3, len(existing_photos)))
                     for ep_idx, ep in enumerate(existing_photos):
                         with ep_cols[ep_idx % len(ep_cols)]:
                             st.image(ep["bytes"], use_container_width=True)
-                social_url = st.text_input(
-                    "Redes sociales (opcional)",
-                    key=f"social_{i}",
-                    placeholder="Pega aquí un URL de Facebook, Instagram o LinkedIn",
-                    help="Puedes agregar el enlace público a una publicación relacionada con esta actividad."
-                )
-                if social_url.strip():
-                    normalized_social = normalize_social_url(social_url)
-                    if not social_url_is_valid(normalized_social):
-                        st.warning("El enlace de redes sociales no parece ser un URL válido.")
-                    else:
-                        render_social_preview(normalized_social, key_suffix=str(i))
-
-                chart = st.file_uploader(
-                    "Gráfica (opcional)",
-                    type=["jpg", "jpeg", "png"],
-                    key=f"chart_{i}",
-                    help="Sube una gráfica relacionada con esta actividad en formato PNG o JPG."
-                )
+                chart = st.file_uploader("Gráfica (opcional)", type=["jpg", "jpeg", "png"], key=f"chart_{i}")
                 existing_chart = st.session_state.get(f"existing_chart_{i}")
                 if chart or existing_chart:
-                    chart_title = st.text_input(
-                        "Título de la gráfica",
-                        key=f"chart_title_{i}",
-                        placeholder="Ej. Participación por tipo de actividad",
-                        help="Este título será visible en las previsualizaciones y en los informes."
-                    )
-                    if chart:
-                        st.image(chart, caption=chart_title or "Gráfica sin título", use_container_width=True)
-                    elif existing_chart:
-                        st.caption("Gráfica guardada en el borrador")
-                        st.image(
-                            existing_chart["bytes"],
-                            caption=chart_title or existing_chart.get("title") or "Gráfica",
-                            use_container_width=True
-                        )
-                else:
-                    chart_title = ""
+                    st.text_input("Título de la gráfica", key=f"chart_title_{i}")
+                    preview_chart = chart or existing_chart
+                    try:
+                        st.image(upload_bytes(preview_chart), use_container_width=True)
+                    except Exception:
+                        pass
 
-                activity_started = bool(
-                    title.strip() or desc.strip() or participants > 0
-                    or ranking_text != "Sin ranking"
-                    or category_selected != CATEGORIES[0]
-                    or photos or social_url.strip() or chart
-                    or existing_photos or existing_chart
-                )
-                if activity_started:
-                    ranking = None if ranking_text == "Sin ranking" else int(ranking_text[-1])
-                    activities.append({
-                        "title": title.strip(),
-                        "description": desc.strip(),
-                        "category": category,
-                        "ranking": ranking,
-                        "participants": participants or None,
-                        "photos": photos or [],
-                        "social_url": normalize_social_url(social_url),
-                        "chart": chart,
-                        "chart_title": chart_title.strip(),
-                        "existing_photos": existing_photos,
-                        "existing_chart": existing_chart,
-                    })
-                    missing=[]
-                    if not title.strip(): missing.append("nombre del hito / actividad")
-                    if not desc.strip(): missing.append("descripción")
-                    if participants <= 0: missing.append("participantes / alcance")
-                    if category_selected == "Otro" and not other_category.strip(): missing.append("categoría específica")
-                    if (chart or existing_chart) and not chart_title.strip():
-                        missing.append("título de la gráfica")
-                    if missing: errors.append(f"Actividad {i+1}: completa " + ", ".join(missing) + ".")
-                    if wc > 250: errors.append(f"Actividad {i+1}: excede 250 palabras.")
-                    if missing: st.warning("Esta actividad está incompleta. Antes de continuar, completa: " + ", ".join(missing) + ". La fotografía es opcional.")
+                record, missing = activity_from_session(i, actor_role=user_role, month=month)
+                if record is not None and missing:
+                    st.warning("Completa: " + ", ".join(missing) + ".")
 
-        if st.session_state.get("ranking_conflict_message"):
-            st.warning(
-                "⚠️ " + st.session_state.ranking_conflict_message
-                + " Cada reporte sólo puede tener un Top 1, un Top 2 y un Top 3."
-            )
+        activities, errors = validate_current_activities(st.session_state.num_activities)
 
         cadd, crem = st.columns([1, 4])
         with cadd:
-            if st.button("➕ Agregar actividad"):
-                incomplete = [
-                    e for e in errors
-                    if "completa" in e.lower() or "excede 250 palabras" in e.lower()
-                ]
-                if incomplete:
-                    st.error("Completa primero todas las actividades iniciadas antes de agregar otra.")
+            if st.button("➕ Agregar acción"):
+                if errors:
+                    st.error("Completa primero todas las acciones iniciadas antes de agregar otra.")
                 else:
                     st.session_state.num_activities += 1
                     st.rerun()
@@ -4308,11 +4657,94 @@ if profile == "Centro / Dirección":
                 st.session_state.num_activities -= 1
                 st.rerun()
 
-        ranks = [a["ranking"] for a in activities if a["ranking"]]
-        if len(ranks) != len(set(ranks)):
-            errors.append("Top 1, Top 2 y Top 3 no pueden repetirse.")
+        st.divider()
+        st.subheader("Lo más relevante del mes")
+        st.caption(
+            "Selecciona de 1 a 3 acciones sustantivas. El orden de selección corresponde a Top 1, Top 2 y Top 3."
+        )
+        activity_labels = [f"{idx+1}. {a.get('title') or a.get('category')}" for idx, a in enumerate(activities)]
+        monthly_highlights = None
+        highlight_messages = []
+        if user_role == "DIRECTOR":
+            existing_sel = st.session_state.get("highlight_selection", []) or []
+            st.session_state["highlight_selection"] = [x for x in existing_sel if x in activity_labels]
+            selected_highlights = st.multiselect(
+                "Acciones más relevantes",
+                activity_labels,
+                key="highlight_selection",
+                max_selections=3,
+                placeholder="Selecciona entre 1 y 3 acciones",
+            )
+            monthly_highlights = []
+            for rank_pos, label in enumerate(selected_highlights, start=1):
+                act_idx = activity_labels.index(label)
+                reason_key = f"highlight_reason_{act_idx}"
+                why = st.text_area(
+                    f"¿Por qué es relevante? · Top {rank_pos} · {activities[act_idx].get('title','')}",
+                    key=reason_key,
+                    height=85,
+                ).strip()
+                activities[act_idx]["ranking"] = rank_pos
+                monthly_highlights.append({
+                    "label": label,
+                    "activity_index": act_idx,
+                    "title": activities[act_idx].get("title"),
+                    "category": activities[act_idx].get("category"),
+                    "why": why,
+                    "ranking": rank_pos,
+                })
+                if not why:
+                    highlight_messages.append(f"Explica por qué es relevante el Top {rank_pos}.")
+            if activities and not selected_highlights:
+                highlight_messages.append("Selecciona al menos una acción como lo más relevante del mes.")
+        else:
+            st.info("El Director seleccionará y justificará aquí las 1–3 acciones más relevantes antes del envío final.")
+
+        media_actions = [a for a in activities if a.get("category") == "Participación en medios de difusión"]
+        media_summary = None
+        if media_actions:
+            st.divider()
+            st.subheader("Datos concentrados de medios del mes")
+            st.caption("Se llenan una sola vez por mes, no por cada participación.")
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                media_appearances = st.number_input("Número de apariciones en medios", min_value=0, step=1, key="media_appearances")
+            with m2:
+                media_total = st.number_input("Número total de participaciones", min_value=0, step=1, key="media_total_participations")
+            with m3:
+                media_reach = st.number_input("Alcance o audiencia (si se cuenta con el dato)", min_value=0, step=1, key="media_reach")
+            media_summary = {"appearances": int(media_appearances), "total_participations": int(media_total), "reach": int(media_reach)}
 
         st.divider()
+        st.subheader("Aprendizajes")
+        st.caption("Reflexión guiada. Procura responder de 3 a 5 líneas por apartado.")
+        learning_planning = st.text_area(
+            "Avances sustantivos en los objetivos de planeación",
+            key="learning_planning_advances", height=100,
+        )
+        learning_risks = st.text_area(
+            "Acciones planeadas que se encuentran paradas, en riesgo, o que requieren decisiones",
+            key="learning_risks", height=100,
+        )
+        learning_opportunity = st.text_area(
+            "Un aprendizaje u oportunidad derivado del trabajo mensual",
+            key="learning_opportunity", height=100,
+        )
+
+        learning_messages = []
+        if user_role == "DIRECTOR":
+            if not learning_planning.strip(): learning_messages.append("Completa los avances sustantivos de planeación.")
+            if not learning_risks.strip(): learning_messages.append("Completa las acciones en riesgo o que requieren decisiones.")
+            if not learning_opportunity.strip(): learning_messages.append("Completa el aprendizaje u oportunidad del mes.")
+
+        report_extras = {
+            "monthly_highlights": monthly_highlights,
+            "learning_planning_advances": learning_planning.strip(),
+            "learning_risks": learning_risks.strip(),
+            "learning_opportunity": learning_opportunity.strip(),
+            "media_monthly_summary": media_summary,
+        }
+        final_report_messages = errors + (highlight_messages if user_role == "DIRECTOR" else []) + (learning_messages if user_role == "DIRECTOR" else [])
 
         st.subheader("Vista previa del reporte")
         st.caption(
@@ -4323,6 +4755,8 @@ if profile == "Centro / Dirección":
         validated_activities, validation_messages = validate_current_activities(
             st.session_state.num_activities
         )
+        if user_role == "DIRECTOR":
+            validated_activities = apply_highlights_to_activities(validated_activities, monthly_highlights)
         preview_ready = bool(validated_activities) and not validation_messages
 
         pv_col, _ = st.columns([1, 3])
@@ -4340,10 +4774,10 @@ if profile == "Centro / Dirección":
                     st.rerun()
 
         if preview_ready:
-            preview_word = generate_center_word(unit, month, year, validated_activities)
-            preview_pdf = generate_center_pdf(unit, month, year, validated_activities)
+            preview_word = generate_center_word(unit, month, year, validated_activities, report_extras)
+            preview_pdf = generate_center_pdf(unit, month, year, validated_activities, report_extras)
             if st.session_state.show_center_preview:
-                render_center_preview(unit, month, year, validated_activities)
+                render_center_preview(unit, month, year, validated_activities, report_extras)
         else:
             preview_word = b""
             preview_pdf = b""
@@ -4389,12 +4823,14 @@ if profile == "Centro / Dirección":
                 validated_activities, validation_messages = validate_current_activities(
                     st.session_state.num_activities
                 )
+                if user_role == "DIRECTOR":
+                    validated_activities = apply_highlights_to_activities(validated_activities, monthly_highlights)
                 if validation_messages:
                     show_validation_messages(validation_messages)
                 elif not validated_activities:
-                    st.warning("Captura al menos una actividad.")
+                    st.warning("Captura al menos una acción.")
                 else:
-                    rid = save_report(unit, month, year, "BORRADOR", sender_email)
+                    rid = save_report(unit, month, year, "BORRADOR", sender_email, report_extras=report_extras)
                     persistence_errors = replace_activities(rid, validated_activities, actor_role=user_role)
                     if persistence_errors:
                         st.error(
@@ -4419,15 +4855,20 @@ if profile == "Centro / Dirección":
                 validated_activities, validation_messages = validate_current_activities(
                     st.session_state.num_activities
                 )
+                validated_activities = apply_highlights_to_activities(validated_activities, monthly_highlights)
                 if not email_is_iteso(sender_email):
                     st.error("El correo de la sesión no es válido.")
                 elif validation_messages:
                     show_validation_messages(validation_messages)
+                elif highlight_messages:
+                    for msg in highlight_messages: st.error(msg)
+                elif learning_messages:
+                    for msg in learning_messages: st.error(msg)
                 elif not validated_activities:
-                    st.warning("Captura al menos una actividad.")
+                    st.warning("Captura al menos una acción.")
                 else:
                     confirm_submission_dialog(
-                        unit, month, year, sender_email, validated_activities, actor_role=user_role
+                        unit, month, year, sender_email, validated_activities, actor_role=user_role, report_extras=report_extras
                     )
 
     elif page == "Mis reportes":
@@ -5579,4 +6020,4 @@ else:
             st.info("Escribe una palabra o tema para buscar en el histórico.")
 
 st.divider()
-st.caption("Prototipo V1.32 · Dirección de Integración Comunitaria · ITESO")
+st.caption("Prototipo V1.33 · Dirección de Integración Comunitaria · ITESO")
