@@ -363,6 +363,16 @@ if "database_backup_bytes" not in st.session_state:
     st.session_state.database_backup_bytes = None
 if "database_backup_filename" not in st.session_state:
     st.session_state.database_backup_filename = ""
+if "num_strategic_advances" not in st.session_state:
+    st.session_state.num_strategic_advances = 1
+if "num_strategic_issues" not in st.session_state:
+    st.session_state.num_strategic_issues = 1
+if "num_strategic_learnings" not in st.session_state:
+    st.session_state.num_strategic_learnings = 1
+if "no_strategic_issues" not in st.session_state:
+    st.session_state.no_strategic_issues = False
+if "monthly_strategic_summary" not in st.session_state:
+    st.session_state.monthly_strategic_summary = ""
 
 SESSION_TIMEOUT_SECONDS = 30 * 60
 
@@ -380,6 +390,11 @@ def clear_center_capture_state(reset_period=False):
         "research_end_", "research_progress_", "research_products_", "research_pct_",
         "research_on_plan_", "research_on_plan_why_", "photos_", "social_", "chart_",
         "chart_title_", "existing_photos_", "existing_chart_",
+        "adv_topic_", "adv_progress_", "adv_evidence_", "adv_level_", "adv_link_",
+        "issue_type_", "issue_topic_", "issue_desc_", "issue_priority_", "issue_need_",
+        "issue_dependency_", "issue_date_", "issue_link_", "issue_status_",
+        "learn_type_", "learn_topic_", "learn_observation_", "learn_implication_",
+        "learn_next_", "learn_link_",
     )
     exact_keys = {
         "show_center_preview",
@@ -391,7 +406,8 @@ def clear_center_capture_state(reset_period=False):
         "director_docx_upload",
         "highlight_selection", "learning_planning_advances", "learning_risks",
         "learning_opportunity", "media_appearances", "media_total_participations",
-        "media_reach",
+        "media_reach", "num_strategic_advances", "num_strategic_issues",
+        "num_strategic_learnings", "no_strategic_issues", "monthly_strategic_summary",
     }
 
     for key in list(st.session_state.keys()):
@@ -408,6 +424,11 @@ def clear_center_capture_state(reset_period=False):
     st.session_state.docx_import_warnings = []
     st.session_state.docx_import_filename = ""
     st.session_state.num_activities = 5
+    st.session_state.num_strategic_advances = 1
+    st.session_state.num_strategic_issues = 1
+    st.session_state.num_strategic_learnings = 1
+    st.session_state.no_strategic_issues = False
+    st.session_state.monthly_strategic_summary = ""
     st.session_state.capture_method = "Carga manual"
 
     if reset_period:
@@ -415,9 +436,133 @@ def clear_center_capture_state(reset_period=False):
         st.session_state.capture_year = datetime.now().year
 
 
+def _legacy_reflection_text(rows, kind):
+    """Create a readable legacy text summary so older exports/searches remain useful."""
+    parts = []
+    for row in rows or []:
+        if kind == "advance":
+            text = f"{row.get('objective_topic','')}: {row.get('progress','')}"
+            if row.get('evidence'):
+                text += f" | Evidencia: {row.get('evidence')}"
+            if row.get('progress_level'):
+                text += f" | Nivel: {row.get('progress_level')}"
+        elif kind == "issue":
+            text = f"{row.get('issue_type','')}: {row.get('topic','')} — {row.get('description','')}"
+            if row.get('priority'):
+                text += f" | Prioridad: {row.get('priority')}"
+            if row.get('need_type'):
+                text += f" | Necesita: {row.get('need_type')}"
+        else:
+            text = f"{row.get('learning_type','')}: {row.get('topic','')} — {row.get('observation','')}"
+            if row.get('implication'):
+                text += f" | Implicación: {row.get('implication')}"
+            if row.get('next_step'):
+                text += f" | Próximo paso: {row.get('next_step')}"
+        if text.strip(' :—|'):
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def get_structured_reflection(report_id):
+    """Return the three structured strategic blocks for a monthly report."""
+    empty = {"advances": [], "issues": [], "learnings": []}
+    if not report_id:
+        return empty
+    if not supabase:
+        rep = next((r for r in st.session_state.demo_reports if r.get("id") == report_id), None) or {}
+        return {
+            "advances": rep.get("strategic_advances") or [],
+            "issues": rep.get("strategic_issues") or [],
+            "learnings": rep.get("strategic_learnings") or [],
+        }
+    try:
+        advances = supabase.table("report_strategic_advances").select("*").eq("report_id", report_id).order("order_index").execute().data or []
+        issues = supabase.table("report_strategic_issues").select("*").eq("report_id", report_id).order("order_index").execute().data or []
+        learnings = supabase.table("report_strategic_learnings").select("*").eq("report_id", report_id).order("order_index").execute().data or []
+        return {"advances": advances, "issues": issues, "learnings": learnings}
+    except Exception:
+        return empty
+
+
+def replace_structured_reflection(report_id, advances, issues, learnings, actor_email=""):
+    """Replace report-level strategic rows. Only called on explicit draft/final saves."""
+    if not report_id:
+        return
+    if not supabase:
+        rep = next((r for r in st.session_state.demo_reports if r.get("id") == report_id), None)
+        if rep is not None:
+            rep["strategic_advances"] = advances or []
+            rep["strategic_issues"] = issues or []
+            rep["strategic_learnings"] = learnings or []
+        return
+
+    now = datetime.utcnow().isoformat()
+    for table in ["report_strategic_advances", "report_strategic_issues", "report_strategic_learnings"]:
+        supabase.table(table).delete().eq("report_id", report_id).execute()
+
+    for idx, row in enumerate(advances or [], start=1):
+        payload = {
+            "report_id": report_id,
+            "order_index": idx,
+            "objective_topic": row.get("objective_topic"),
+            "progress": row.get("progress"),
+            "evidence": row.get("evidence") or None,
+            "progress_level": row.get("progress_level"),
+            "linked_activity_order": row.get("linked_activity_order"),
+            "linked_activity_title": row.get("linked_activity_title") or None,
+            "created_by": actor_email or None,
+            "updated_by": actor_email or None,
+            "updated_at": now,
+        }
+        supabase.table("report_strategic_advances").insert(payload).execute()
+
+    for idx, row in enumerate(issues or [], start=1):
+        target_date = row.get("target_date")
+        if hasattr(target_date, "isoformat"):
+            target_date = target_date.isoformat()
+        payload = {
+            "report_id": report_id,
+            "order_index": idx,
+            "issue_type": row.get("issue_type"),
+            "topic": row.get("topic"),
+            "description": row.get("description"),
+            "priority": row.get("priority"),
+            "need_type": row.get("need_type") or None,
+            "dependency": row.get("dependency") or None,
+            "target_date": target_date or None,
+            "issue_status": row.get("issue_status") or "Abierto",
+            "linked_activity_order": row.get("linked_activity_order"),
+            "linked_activity_title": row.get("linked_activity_title") or None,
+            "created_by": actor_email or None,
+            "updated_by": actor_email or None,
+            "updated_at": now,
+        }
+        supabase.table("report_strategic_issues").insert(payload).execute()
+
+    for idx, row in enumerate(learnings or [], start=1):
+        payload = {
+            "report_id": report_id,
+            "order_index": idx,
+            "learning_type": row.get("learning_type"),
+            "topic": row.get("topic"),
+            "observation": row.get("observation"),
+            "implication": row.get("implication"),
+            "next_step": row.get("next_step") or None,
+            "linked_activity_order": row.get("linked_activity_order"),
+            "linked_activity_title": row.get("linked_activity_title") or None,
+            "created_by": actor_email or None,
+            "updated_by": actor_email or None,
+            "updated_at": now,
+        }
+        supabase.table("report_strategic_learnings").insert(payload).execute()
+
+
 def save_report(unit, month, year, status, sender_email="", report_extras=None):
-    """Create/update the monthly report and persist the new report-level reflection blocks."""
+    """Create/update the monthly report and its report-level strategic reflection."""
     report_extras = report_extras or {}
+    advances = report_extras.get("strategic_advances") or []
+    issues = report_extras.get("strategic_issues") or []
+    learnings = report_extras.get("strategic_learnings") or []
     payload_extras = {
         k: v for k, v in {
             "monthly_highlights": report_extras.get("monthly_highlights"),
@@ -425,7 +570,9 @@ def save_report(unit, month, year, status, sender_email="", report_extras=None):
             "learning_risks": report_extras.get("learning_risks"),
             "learning_opportunity": report_extras.get("learning_opportunity"),
             "media_monthly_summary": report_extras.get("media_monthly_summary"),
-            "form_version": "2026-09-24",
+            "monthly_strategic_summary": report_extras.get("monthly_strategic_summary"),
+            "no_strategic_issues": report_extras.get("no_strategic_issues"),
+            "form_version": "2026-09-28-structured-reflection",
         }.items() if v is not None
     }
     if supabase:
@@ -447,6 +594,8 @@ def save_report(unit, month, year, status, sender_email="", report_extras=None):
                 **payload_extras,
             }
             supabase.table("reports").update(payload).eq("id", rid).execute()
+            if any(k in report_extras for k in ("strategic_advances", "strategic_issues", "strategic_learnings")):
+                replace_structured_reflection(rid, advances, issues, learnings, sender_email)
             return rid
         payload = {
             "unit_code": unit,
@@ -457,7 +606,10 @@ def save_report(unit, month, year, status, sender_email="", report_extras=None):
             **payload_extras,
         }
         res = supabase.table("reports").insert(payload).execute()
-        return res.data[0]["id"]
+        rid = res.data[0]["id"]
+        if any(k in report_extras for k in ("strategic_advances", "strategic_issues", "strategic_learnings")):
+            replace_structured_reflection(rid, advances, issues, learnings, sender_email)
+        return rid
 
     found = next((r for r in st.session_state.demo_reports
                   if r["unit_code"] == unit and r["month"] == month and r["year"] == year), None)
@@ -468,6 +620,8 @@ def save_report(unit, month, year, status, sender_email="", report_extras=None):
         found.update(payload_extras)
         if status == "ENVIADO":
             found["submitted_at"] = datetime.now().isoformat()
+        if any(k in report_extras for k in ("strategic_advances", "strategic_issues", "strategic_learnings")):
+            replace_structured_reflection(found["id"], advances, issues, learnings, sender_email)
         return found["id"]
     rid = str(uuid.uuid4())
     st.session_state.demo_reports.append({
@@ -477,7 +631,254 @@ def save_report(unit, month, year, status, sender_email="", report_extras=None):
         "created_at": datetime.now().isoformat(),
         **payload_extras,
     })
+    if any(k in report_extras for k in ("strategic_advances", "strategic_issues", "strategic_learnings")):
+        replace_structured_reflection(rid, advances, issues, learnings, sender_email)
     return rid
+
+
+def save_single_activity(report_id, order_index, activity, actor_role="DIRECTOR"):
+    """Persist one action without replacing the other actions in the monthly report."""
+    persistence_errors = []
+    actor_role = str(actor_role or "").upper()
+
+    if supabase:
+        existing_rows = (
+            supabase.table("activities")
+            .select("id,ranking,chart_storage_path")
+            .eq("report_id", report_id)
+            .eq("order_index", order_index)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+        existing = existing_rows[0] if existing_rows else None
+        preserved_ranking = existing.get("ranking") if existing and actor_role != "DIRECTOR" else None
+
+        payload = {
+            "report_id": report_id,
+            "title": activity["title"],
+            "description_original": activity["description"],
+            "description_edited": activity["description"],
+            "category": activity["category"],
+            "ranking": activity.get("ranking") if actor_role == "DIRECTOR" else preserved_ranking,
+            "activity_date": activity.get("activity_date").isoformat() if activity.get("activity_date") else None,
+            "participants": activity.get("participants"),
+            "action_purpose": activity.get("action_purpose"),
+            "action_type": activity.get("action_type"),
+            "inclusion_criteria": activity.get("inclusion_criteria") or [],
+            "location": activity.get("location"),
+            "target_population": activity.get("target_population") or [],
+            "target_external_name": activity.get("target_external_name"),
+            "dic_collaboration": activity.get("dic_collaboration"),
+            "dic_collaboration_units": activity.get("dic_collaboration_units"),
+            "relevance_note": activity.get("relevance_note"),
+            "detail_data": activity.get("detail_data") or {},
+            "social_url": normalize_social_url(activity.get("social_url")),
+            "chart_title": (activity.get("chart_title") or "").strip() or None,
+            "chart_storage_path": None,
+            "chart_original_filename": None,
+            "order_index": order_index,
+        }
+
+        # Replace only the media for this one action. The other actions remain untouched.
+        if existing:
+            activity_id = existing["id"]
+            old_photo_rows = (
+                supabase.table("activity_photos")
+                .select("storage_path")
+                .eq("activity_id", activity_id)
+                .execute()
+                .data or []
+            )
+            old_paths = [r.get("storage_path") for r in old_photo_rows if r.get("storage_path")]
+            if existing.get("chart_storage_path"):
+                old_paths.append(existing["chart_storage_path"])
+            if old_paths:
+                try:
+                    supabase.storage.from_("dic-activity-photos").remove(old_paths)
+                except Exception:
+                    pass
+            try:
+                supabase.table("activity_photos").delete().eq("activity_id", activity_id).execute()
+            except Exception:
+                pass
+            res = supabase.table("activities").update(payload).eq("id", activity_id).execute()
+            if not res.data:
+                persistence_errors.append(f"No se pudo actualizar la acción `{activity.get('title','Acción')}`.")
+                return persistence_errors
+        else:
+            res = supabase.table("activities").insert(payload).execute()
+            if not res.data:
+                persistence_errors.append(f"No se pudo crear la acción `{activity.get('title','Acción')}`.")
+                return persistence_errors
+            activity_id = res.data[0]["id"]
+
+        all_photos = (activity.get("existing_photos", []) or []) + (activity.get("photos", []) or [])
+        expected_photo_count = 0
+        for photo_num, photo in enumerate(all_photos, start=1):
+            photo_bytes = upload_bytes(photo)
+            if not photo_bytes:
+                persistence_errors.append(
+                    f"`{activity['title']}`: la fotografía {photo_num} no contiene datos y no pudo guardarse."
+                )
+                continue
+            expected_photo_count += 1
+            photo_name = upload_name(photo, f"fotografia_{photo_num}.jpg")
+            photo_mime = upload_mime(photo)
+            ext = Path(photo_name).suffix.lower()
+            if ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+                if "png" in (photo_mime or "").lower():
+                    ext = ".png"
+                elif "webp" in (photo_mime or "").lower():
+                    ext = ".webp"
+                else:
+                    ext = ".jpg"
+            storage_path = f"{report_id}/{activity_id}/photos/{uuid.uuid4().hex}{ext}"
+            try:
+                supabase.storage.from_("dic-activity-photos").upload(
+                    path=storage_path,
+                    file=photo_bytes,
+                    file_options={"content-type": photo_mime or "image/jpeg", "upsert": "false"},
+                )
+                meta_res = supabase.table("activity_photos").insert({
+                    "activity_id": activity_id,
+                    "storage_path": storage_path,
+                    "original_filename": photo_name,
+                }).execute()
+                if not meta_res.data:
+                    raise RuntimeError("la fotografía se subió, pero no se registró en activity_photos")
+                verify_bytes = supabase.storage.from_("dic-activity-photos").download(storage_path)
+                if not verify_bytes:
+                    raise RuntimeError("la verificación de la fotografía devolvió un archivo vacío")
+            except Exception as exc:
+                persistence_errors.append(
+                    f"`{activity['title']}`: no se pudo guardar/verificar la fotografía {photo_num}. Detalle: {exc}"
+                )
+
+        if expected_photo_count:
+            try:
+                saved_photo_rows = (
+                    supabase.table("activity_photos")
+                    .select("id,storage_path")
+                    .eq("activity_id", activity_id)
+                    .execute()
+                    .data or []
+                )
+                if len(saved_photo_rows) < expected_photo_count:
+                    persistence_errors.append(
+                        f"`{activity['title']}`: se esperaban {expected_photo_count} fotografía(s), "
+                        f"pero sólo quedaron registradas {len(saved_photo_rows)}."
+                    )
+            except Exception as exc:
+                persistence_errors.append(
+                    f"`{activity['title']}`: no fue posible verificar las fotografías guardadas. Detalle: {exc}"
+                )
+
+        effective_chart = activity.get("chart") or activity.get("existing_chart")
+        if effective_chart:
+            chart_bytes = upload_bytes(effective_chart)
+            if not chart_bytes:
+                persistence_errors.append(f"`{activity['title']}`: la gráfica no contiene datos y no pudo guardarse.")
+            else:
+                chart_original_filename = upload_name(effective_chart, "grafica.jpg")
+                chart_mime = upload_mime(effective_chart)
+                ext = Path(chart_original_filename).suffix.lower()
+                if ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+                    ext = ".png" if "png" in (chart_mime or "").lower() else ".jpg"
+                chart_storage_path = f"{report_id}/{activity_id}/chart/{uuid.uuid4().hex}{ext}"
+                try:
+                    supabase.storage.from_("dic-activity-photos").upload(
+                        path=chart_storage_path,
+                        file=chart_bytes,
+                        file_options={"content-type": chart_mime or "image/jpeg", "upsert": "false"},
+                    )
+                    verify_chart = supabase.storage.from_("dic-activity-photos").download(chart_storage_path)
+                    if not verify_chart:
+                        raise RuntimeError("la verificación de la gráfica devolvió un archivo vacío")
+                    supabase.table("activities").update({
+                        "chart_storage_path": chart_storage_path,
+                        "chart_original_filename": chart_original_filename,
+                    }).eq("id", activity_id).execute()
+                except Exception as exc:
+                    persistence_errors.append(
+                        f"`{activity['title']}`: no se pudo guardar/verificar la gráfica. Detalle: {exc}"
+                    )
+        return persistence_errors
+
+    # Demo/session mode: update or create only the requested order position.
+    existing = next(
+        (a for a in st.session_state.demo_activities
+         if a.get("report_id") == report_id and int(a.get("order_index") or 0) == int(order_index)),
+        None,
+    )
+    if existing:
+        activity_id = existing["id"]
+        preserved_ranking = existing.get("ranking") if actor_role != "DIRECTOR" else activity.get("ranking")
+        existing.update({
+            "title": activity["title"],
+            "description_original": activity["description"],
+            "description_edited": activity["description"],
+            "category": activity["category"],
+            "ranking": preserved_ranking,
+            "activity_date": activity.get("activity_date"),
+            "participants": activity.get("participants"),
+            "action_purpose": activity.get("action_purpose"),
+            "action_type": activity.get("action_type"),
+            "inclusion_criteria": activity.get("inclusion_criteria") or [],
+            "location": activity.get("location"),
+            "target_population": activity.get("target_population") or [],
+            "target_external_name": activity.get("target_external_name"),
+            "dic_collaboration": activity.get("dic_collaboration"),
+            "dic_collaboration_units": activity.get("dic_collaboration_units"),
+            "relevance_note": activity.get("relevance_note"),
+            "detail_data": activity.get("detail_data") or {},
+            "social_url": normalize_social_url(activity.get("social_url")),
+            "chart_title": activity.get("chart_title"),
+            "chart_bytes": upload_bytes(activity.get("chart") or activity.get("existing_chart")),
+            "chart_original_filename": upload_name(activity.get("chart") or activity.get("existing_chart"), "grafica.jpg") if (activity.get("chart") or activity.get("existing_chart")) else None,
+            "order_index": order_index,
+        })
+        st.session_state.demo_photos = [p for p in st.session_state.demo_photos if p.get("activity_id") != activity_id]
+    else:
+        activity_id = str(uuid.uuid4())
+        st.session_state.demo_activities.append({
+            "id": activity_id,
+            "report_id": report_id,
+            "title": activity["title"],
+            "description_original": activity["description"],
+            "description_edited": activity["description"],
+            "category": activity["category"],
+            "ranking": activity.get("ranking") if actor_role == "DIRECTOR" else None,
+            "activity_date": activity.get("activity_date"),
+            "participants": activity.get("participants"),
+            "action_purpose": activity.get("action_purpose"),
+            "action_type": activity.get("action_type"),
+            "inclusion_criteria": activity.get("inclusion_criteria") or [],
+            "location": activity.get("location"),
+            "target_population": activity.get("target_population") or [],
+            "target_external_name": activity.get("target_external_name"),
+            "dic_collaboration": activity.get("dic_collaboration"),
+            "dic_collaboration_units": activity.get("dic_collaboration_units"),
+            "relevance_note": activity.get("relevance_note"),
+            "detail_data": activity.get("detail_data") or {},
+            "social_url": normalize_social_url(activity.get("social_url")),
+            "chart_title": activity.get("chart_title"),
+            "chart_bytes": upload_bytes(activity.get("chart") or activity.get("existing_chart")),
+            "chart_original_filename": upload_name(activity.get("chart") or activity.get("existing_chart"), "grafica.jpg") if (activity.get("chart") or activity.get("existing_chart")) else None,
+            "order_index": order_index,
+        })
+    for photo in (activity.get("existing_photos", []) or []) + (activity.get("photos", []) or []):
+        data = upload_bytes(photo)
+        if data:
+            st.session_state.demo_photos.append({
+                "id": str(uuid.uuid4()),
+                "activity_id": activity_id,
+                "original_filename": upload_name(photo, "fotografia.jpg"),
+                "mime_type": upload_mime(photo),
+                "bytes": data,
+            })
+    return persistence_errors
+
 
 def replace_activities(report_id, activities, actor_role="DIRECTOR"):
     """
@@ -976,13 +1377,33 @@ def render_center_preview(unit, month, year, activities, report_extras=None):
             st.write(h.get("why") or "")
 
     if any(report_extras.get(k) for k in ["learning_planning_advances", "learning_risks", "learning_opportunity"]):
-        st.markdown("### Aprendizajes")
-        st.markdown("**Avances sustantivos en los objetivos de planeación**")
-        st.write(report_extras.get("learning_planning_advances") or "")
-        st.markdown("**Acciones paradas, en riesgo o que requieren decisiones**")
-        st.write(report_extras.get("learning_risks") or "")
-        st.markdown("**Aprendizaje u oportunidad derivado del trabajo mensual**")
-        st.write(report_extras.get("learning_opportunity") or "")
+        st.markdown("### Aprendizajes y seguimiento estratégico")
+        advances = report_extras.get("strategic_advances") or []
+        issues = report_extras.get("strategic_issues") or []
+        learnings = report_extras.get("strategic_learnings") or []
+        if advances:
+            st.markdown("#### Avances sustantivos")
+            for row in advances:
+                st.markdown(f"**{row.get('objective_topic','')} · {row.get('progress_level','')}**")
+                st.write(row.get("progress") or "")
+                if row.get("evidence"): st.caption(f"Evidencia: {row.get('evidence')}")
+        if report_extras.get("no_strategic_issues"):
+            st.markdown("#### Riesgos, bloqueos y decisiones")
+            st.write("Sin situaciones críticas reportadas este mes.")
+        elif issues:
+            st.markdown("#### Riesgos, bloqueos y decisiones")
+            for row in issues:
+                st.markdown(f"**{row.get('issue_type','')} · {row.get('topic','')} · Prioridad {row.get('priority','')}**")
+                st.write(row.get("description") or "")
+        if learnings:
+            st.markdown("#### Aprendizajes y oportunidades")
+            for row in learnings:
+                st.markdown(f"**{row.get('learning_type','')} · {row.get('topic','')}**")
+                st.write(row.get("observation") or "")
+                st.caption(f"Implicación: {row.get('implication') or ''}")
+        if report_extras.get("monthly_strategic_summary"):
+            st.markdown("#### Síntesis del mes")
+            st.write(report_extras.get("monthly_strategic_summary"))
 
 
 def render_consolidated_preview(month, year, reports, activities_by_report):
@@ -2084,7 +2505,9 @@ def resume_draft(report):
     for key in list(st.session_state.keys()):
         if re.match(
             r"^(title|desc|cat|other_cat|rank|part|photos|social|chart|chart_title|"
-            r"existing_photos|existing_chart)_\d+$",
+            r"existing_photos|existing_chart|adv_topic|adv_progress|adv_evidence|adv_level|adv_link|"
+            r"issue_type|issue_topic|issue_desc|issue_priority|issue_need|issue_dependency|issue_date|issue_link|issue_status|"
+            r"learn_type|learn_topic|learn_observation|learn_implication|learn_next|learn_link)_\d+$",
             key,
         ):
             keys_to_clear.append(key)
@@ -2156,6 +2579,45 @@ def resume_draft(report):
     st.session_state["learning_planning_advances"] = report.get("learning_planning_advances") or ""
     st.session_state["learning_risks"] = report.get("learning_risks") or ""
     st.session_state["learning_opportunity"] = report.get("learning_opportunity") or ""
+
+    structured = get_structured_reflection(report.get("id"))
+    advances = structured.get("advances") or []
+    issues = structured.get("issues") or []
+    learnings = structured.get("learnings") or []
+    st.session_state.num_strategic_advances = max(1, len(advances))
+    st.session_state.num_strategic_issues = max(1, len(issues))
+    st.session_state.num_strategic_learnings = max(1, len(learnings))
+    st.session_state.no_strategic_issues = bool(report.get("no_strategic_issues"))
+    st.session_state.monthly_strategic_summary = report.get("monthly_strategic_summary") or ""
+
+    for idx, row in enumerate(advances):
+        st.session_state[f"adv_topic_{idx}"] = row.get("objective_topic") or ""
+        st.session_state[f"adv_progress_{idx}"] = row.get("progress") or ""
+        st.session_state[f"adv_evidence_{idx}"] = row.get("evidence") or ""
+        st.session_state[f"adv_level_{idx}"] = row.get("progress_level") or "En proceso"
+        linked_order = row.get("linked_activity_order")
+        st.session_state[f"adv_link_{idx}"] = int(linked_order) if linked_order else 0
+
+    for idx, row in enumerate(issues):
+        st.session_state[f"issue_type_{idx}"] = row.get("issue_type") or "Riesgo"
+        st.session_state[f"issue_topic_{idx}"] = row.get("topic") or ""
+        st.session_state[f"issue_desc_{idx}"] = row.get("description") or ""
+        st.session_state[f"issue_priority_{idx}"] = row.get("priority") or "Medio"
+        st.session_state[f"issue_need_{idx}"] = row.get("need_type") or "Seguimiento"
+        st.session_state[f"issue_dependency_{idx}"] = row.get("dependency") or ""
+        st.session_state[f"issue_status_{idx}"] = row.get("issue_status") or "Abierto"
+        linked_order = row.get("linked_activity_order")
+        st.session_state[f"issue_link_{idx}"] = int(linked_order) if linked_order else 0
+
+    for idx, row in enumerate(learnings):
+        st.session_state[f"learn_type_{idx}"] = row.get("learning_type") or "Aprendizaje"
+        st.session_state[f"learn_topic_{idx}"] = row.get("topic") or ""
+        st.session_state[f"learn_observation_{idx}"] = row.get("observation") or ""
+        st.session_state[f"learn_implication_{idx}"] = row.get("implication") or ""
+        st.session_state[f"learn_next_{idx}"] = row.get("next_step") or ""
+        linked_order = row.get("linked_activity_order")
+        st.session_state[f"learn_link_{idx}"] = int(linked_order) if linked_order else 0
+
     media_summary = report.get("media_monthly_summary") or {}
     st.session_state["media_appearances"] = int(media_summary.get("appearances") or 0)
     st.session_state["media_total_participations"] = int(media_summary.get("total_participations") or 0)
@@ -4282,7 +4744,10 @@ def fetch_all_table_rows(table_name, page_size=1000):
 
 def generate_database_backup_zip():
     """Create a portable ZIP backup of the application database tables (not Storage binaries)."""
-    tables = ["units", "reports", "activities", "activity_photos", "authorized_users", "audit_log"]
+    tables = [
+        "units", "reports", "activities", "activity_photos", "authorized_users", "audit_log",
+        "report_strategic_advances", "report_strategic_issues", "report_strategic_learnings",
+    ]
     bio = io.BytesIO()
     generated_at = datetime.utcnow().isoformat() + "Z"
     metadata = {
@@ -4642,6 +5107,36 @@ if profile == "Centro / Dirección":
                 if record is not None and missing:
                     st.warning("Completa: " + ", ".join(missing) + ".")
 
+                action_ready = record is not None and not missing
+                if st.session_state.get(f"action_saved_ok_{i}"):
+                    st.success("✓ Acción guardada. Puedes seguir editándola y volver a guardar los cambios.")
+
+                if st.button(
+                    "💾 Guardar acción",
+                    key=f"save_action_{i}",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=not action_ready,
+                    help=(
+                        "Completa los campos obligatorios de esta acción para habilitar el guardado."
+                        if not action_ready else
+                        "Guarda únicamente esta acción como parte del borrador mensual."
+                    ),
+                ):
+                    rid = save_report(unit, month, year, "BORRADOR", sender_email)
+                    action_errors = save_single_activity(
+                        rid, i + 1, record, actor_role=user_role
+                    )
+                    if action_errors:
+                        st.session_state[f"action_saved_ok_{i}"] = False
+                        st.error("La acción no se guardó completamente.")
+                        for err in action_errors:
+                            st.markdown(f"- {err}")
+                    else:
+                        st.session_state[f"action_saved_ok_{i}"] = True
+                        st.session_state.resuming_report_id = rid
+                        st.success("✓ Acción guardada en el borrador mensual.")
+
         activities, errors = validate_current_activities(st.session_state.num_activities)
 
         cadd, crem = st.columns([1, 4])
@@ -4716,32 +5211,180 @@ if profile == "Centro / Dirección":
             media_summary = {"appearances": int(media_appearances), "total_participations": int(media_total), "reach": int(media_reach)}
 
         st.divider()
-        st.subheader("Aprendizajes")
-        st.caption("Reflexión guiada. Procura responder de 3 a 5 líneas por apartado.")
-        learning_planning = st.text_area(
-            "Avances sustantivos en los objetivos de planeación",
-            key="learning_planning_advances", height=100,
-        )
-        learning_risks = st.text_area(
-            "Acciones planeadas que se encuentran paradas, en riesgo, o que requieren decisiones",
-            key="learning_risks", height=100,
-        )
-        learning_opportunity = st.text_area(
-            "Un aprendizaje u oportunidad derivado del trabajo mensual",
-            key="learning_opportunity", height=100,
+        st.subheader("Aprendizajes y seguimiento estratégico")
+        st.caption(
+            "Registra cada avance, situación y aprendizaje como un renglón independiente. "
+            "Así podrán buscarse, filtrarse y analizarse por mes, centro, tema y vínculo con las acciones reportadas."
         )
 
+        activity_link_options = [0] + list(range(1, len(activities) + 1))
+        def _activity_link_label(value):
+            if not value:
+                return "Sin vínculo a una acción específica"
+            idx = int(value) - 1
+            if 0 <= idx < len(activities):
+                return f"Acción {value} · {activities[idx].get('title') or activities[idx].get('category','')}"
+            return f"Acción {value}"
+
+        strategic_advances = []
+        strategic_issues = []
+        strategic_learnings = []
         learning_messages = []
+
         if user_role == "DIRECTOR":
-            if not learning_planning.strip(): learning_messages.append("Completa los avances sustantivos de planeación.")
-            if not learning_risks.strip(): learning_messages.append("Completa las acciones en riesgo o que requieren decisiones.")
-            if not learning_opportunity.strip(): learning_messages.append("Completa el aprendizaje u oportunidad del mes.")
+            st.markdown("#### A. Avances sustantivos")
+            st.caption("Un renglón por avance. Registra qué objetivo o tema avanzó, qué cambió y qué evidencia lo muestra.")
+            for idx in range(st.session_state.num_strategic_advances):
+                with st.container(border=True):
+                    a1, a2 = st.columns([2, 1])
+                    with a1:
+                        topic = st.text_input("Objetivo / tema", key=f"adv_topic_{idx}", placeholder="Ej. Fortalecer vinculación con organizaciones")
+                    with a2:
+                        level = st.selectbox(
+                            "Nivel de avance",
+                            ["Inicial", "En proceso", "Avance importante", "Concluido"],
+                            key=f"adv_level_{idx}",
+                        )
+                    progress = st.text_area("Avance observado", key=f"adv_progress_{idx}", height=80, placeholder="¿Qué cambió o se consiguió este mes?")
+                    evidence = st.text_input("Resultado / evidencia (opcional)", key=f"adv_evidence_{idx}", placeholder="Ej. convenio, producto, acuerdo, indicador")
+                    linked = st.selectbox("Acción relacionada (opcional)", activity_link_options, format_func=_activity_link_label, key=f"adv_link_{idx}")
+                    if topic.strip() or progress.strip() or evidence.strip():
+                        if not topic.strip() or not progress.strip():
+                            learning_messages.append(f"Avance {idx+1}: completa Objetivo / tema y Avance observado.")
+                        strategic_advances.append({
+                            "objective_topic": topic.strip(),
+                            "progress": progress.strip(),
+                            "evidence": evidence.strip(),
+                            "progress_level": level,
+                            "linked_activity_order": int(linked) if linked else None,
+                            "linked_activity_title": (activities[int(linked)-1].get("title") if linked and int(linked)-1 < len(activities) else None),
+                        })
+            ca1, ca2 = st.columns([1, 4])
+            with ca1:
+                if st.button("➕ Agregar avance", key="add_strategic_advance"):
+                    st.session_state.num_strategic_advances += 1
+                    st.rerun()
+            with ca2:
+                if st.session_state.num_strategic_advances > 1 and st.button("➖ Quitar último avance", key="remove_strategic_advance"):
+                    st.session_state.num_strategic_advances -= 1
+                    st.rerun()
+
+            st.markdown("#### B. Riesgos, bloqueos y decisiones")
+            st.caption("Registra sólo situaciones que requieran atención. Si no hubo ninguna, márcalo explícitamente.")
+            no_issues = st.checkbox("No hubo acciones paradas, riesgos ni decisiones pendientes este mes", key="no_strategic_issues")
+            if not no_issues:
+                for idx in range(st.session_state.num_strategic_issues):
+                    with st.container(border=True):
+                        i1, i2, i3 = st.columns([1.2, 2, 1])
+                        with i1:
+                            issue_type = st.selectbox("Tipo", ["Acción parada", "Riesgo", "Requiere decisión"], key=f"issue_type_{idx}")
+                        with i2:
+                            issue_topic = st.text_input("Tema", key=f"issue_topic_{idx}", placeholder="Tema o asunto")
+                        with i3:
+                            priority = st.selectbox("Prioridad", ["Bajo", "Medio", "Alto"], key=f"issue_priority_{idx}")
+                        desc = st.text_area("Descripción breve", key=f"issue_desc_{idx}", height=75)
+                        i4, i5, i6 = st.columns(3)
+                        with i4:
+                            need = st.selectbox("Qué se necesita", ["Seguimiento", "Decisión", "Recurso", "Coordinación", "Información", "Otro"], key=f"issue_need_{idx}")
+                        with i5:
+                            status = st.selectbox("Estado", ["Abierto", "En seguimiento", "Resuelto"], key=f"issue_status_{idx}")
+                        with i6:
+                            linked = st.selectbox("Acción relacionada", activity_link_options, format_func=_activity_link_label, key=f"issue_link_{idx}")
+                        dependency = st.text_input("Responsable / instancia de quien depende (opcional)", key=f"issue_dependency_{idx}")
+                        if issue_topic.strip() or desc.strip() or dependency.strip():
+                            if not issue_topic.strip() or not desc.strip():
+                                learning_messages.append(f"Situación {idx+1}: completa Tema y Descripción breve.")
+                            strategic_issues.append({
+                                "issue_type": issue_type,
+                                "topic": issue_topic.strip(),
+                                "description": desc.strip(),
+                                "priority": priority,
+                                "need_type": need,
+                                "dependency": dependency.strip(),
+                                "target_date": None,
+                                "issue_status": status,
+                                "linked_activity_order": int(linked) if linked else None,
+                                "linked_activity_title": (activities[int(linked)-1].get("title") if linked and int(linked)-1 < len(activities) else None),
+                            })
+                ci1, ci2 = st.columns([1, 4])
+                with ci1:
+                    if st.button("➕ Agregar situación", key="add_strategic_issue"):
+                        st.session_state.num_strategic_issues += 1
+                        st.rerun()
+                with ci2:
+                    if st.session_state.num_strategic_issues > 1 and st.button("➖ Quitar última situación", key="remove_strategic_issue"):
+                        st.session_state.num_strategic_issues -= 1
+                        st.rerun()
+
+            st.markdown("#### C. Aprendizajes y oportunidades")
+            st.caption("Un renglón por hallazgo. Separa lo observado de lo que implica y del siguiente paso.")
+            for idx in range(st.session_state.num_strategic_learnings):
+                with st.container(border=True):
+                    l1, l2 = st.columns([1, 2])
+                    with l1:
+                        learning_type = st.selectbox("Tipo", ["Aprendizaje", "Oportunidad"], key=f"learn_type_{idx}")
+                    with l2:
+                        learning_topic = st.text_input("Tema", key=f"learn_topic_{idx}", placeholder="Tema corto para poder buscarlo después")
+                    observation = st.text_area("¿Qué observamos?", key=f"learn_observation_{idx}", height=75)
+                    implication = st.text_area("¿Qué implica?", key=f"learn_implication_{idx}", height=75)
+                    next_step = st.text_input("Próximo paso sugerido (opcional)", key=f"learn_next_{idx}")
+                    linked = st.selectbox("Acción relacionada (opcional)", activity_link_options, format_func=_activity_link_label, key=f"learn_link_{idx}")
+                    if learning_topic.strip() or observation.strip() or implication.strip() or next_step.strip():
+                        if not learning_topic.strip() or not observation.strip() or not implication.strip():
+                            learning_messages.append(f"Aprendizaje {idx+1}: completa Tema, ¿Qué observamos? y ¿Qué implica?.")
+                        strategic_learnings.append({
+                            "learning_type": learning_type,
+                            "topic": learning_topic.strip(),
+                            "observation": observation.strip(),
+                            "implication": implication.strip(),
+                            "next_step": next_step.strip(),
+                            "linked_activity_order": int(linked) if linked else None,
+                            "linked_activity_title": (activities[int(linked)-1].get("title") if linked and int(linked)-1 < len(activities) else None),
+                        })
+            cl1, cl2 = st.columns([1, 4])
+            with cl1:
+                if st.button("➕ Agregar aprendizaje", key="add_strategic_learning"):
+                    st.session_state.num_strategic_learnings += 1
+                    st.rerun()
+            with cl2:
+                if st.session_state.num_strategic_learnings > 1 and st.button("➖ Quitar último aprendizaje", key="remove_strategic_learning"):
+                    st.session_state.num_strategic_learnings -= 1
+                    st.rerun()
+
+            st.markdown("#### D. Síntesis del mes · opcional")
+            monthly_summary = st.text_area(
+                "¿Qué debería recordar la Dirección de este mes?",
+                key="monthly_strategic_summary",
+                height=90,
+                placeholder="Síntesis breve de 3 a 5 líneas.",
+            )
+
+            if not strategic_advances:
+                learning_messages.append("Registra al menos un avance sustantivo del mes.")
+            if not no_issues and not strategic_issues:
+                learning_messages.append("Agrega al menos una situación o marca que no hubo riesgos/decisiones pendientes.")
+            if not strategic_learnings:
+                learning_messages.append("Registra al menos un aprendizaje u oportunidad del mes.")
+        else:
+            st.info("El Director completará aquí los avances, riesgos/decisiones y aprendizajes antes del envío final.")
+            no_issues = bool(st.session_state.get("no_strategic_issues"))
+            monthly_summary = st.session_state.get("monthly_strategic_summary", "")
+
+        # Keep legacy report fields populated so historical exports/searches remain readable.
+        learning_planning = _legacy_reflection_text(strategic_advances, "advance")
+        learning_risks = "Sin situaciones críticas reportadas este mes." if no_issues else _legacy_reflection_text(strategic_issues, "issue")
+        learning_opportunity = _legacy_reflection_text(strategic_learnings, "learning")
 
         report_extras = {
             "monthly_highlights": monthly_highlights,
-            "learning_planning_advances": learning_planning.strip(),
-            "learning_risks": learning_risks.strip(),
-            "learning_opportunity": learning_opportunity.strip(),
+            "learning_planning_advances": learning_planning,
+            "learning_risks": learning_risks,
+            "learning_opportunity": learning_opportunity,
+            "strategic_advances": strategic_advances,
+            "strategic_issues": strategic_issues,
+            "strategic_learnings": strategic_learnings,
+            "no_strategic_issues": bool(no_issues),
+            "monthly_strategic_summary": (monthly_summary or "").strip(),
             "media_monthly_summary": media_summary,
         }
         final_report_messages = errors + (highlight_messages if user_role == "DIRECTOR" else []) + (learning_messages if user_role == "DIRECTOR" else [])
@@ -6020,4 +6663,4 @@ else:
             st.info("Escribe una palabra o tema para buscar en el histórico.")
 
 st.divider()
-st.caption("Prototipo V1.33 · Dirección de Integración Comunitaria · ITESO")
+st.caption("Prototipo V1.35 · Dirección de Integración Comunitaria · ITESO")
